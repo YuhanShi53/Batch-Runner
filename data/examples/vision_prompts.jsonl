@@ -1,0 +1,8 @@
+{"id": "1", "prompt": "Describe this image in detail.", "image": "photos/sample1.jpg", "category": "description"}
+{"id": "2", "prompt": "What objects are visible in this image?", "image": "photos/sample2.png", "category": "object_detection"}
+{"id": "3", "prompt": "What is the main subject of this photo?", "image": "https://example.com/image.jpg", "category": "subject"}
+{"id": "4", "prompt": "Compare these two images.", "images": ["photos/img1.jpg", "photos/img2.jpg"], "category": "comparison"}
+{"id": "5", "prompt": "What text is visible in this image?", "image": "photos/sign.jpg", "category": "ocr"}
+{"id": "6", "prompt": "What is the mood of this scene?", "image": "photos/scene.jpg", "category": "analysis"}
+{"id": "7", "prompt": "How many people are in this image?", "image": "photos/crowd.jpg", "category": "counting"}
+{"id": "8", "prompt": "What colors are dominant?", "image": "photos/artwork.png", "category": "color_analysis"}

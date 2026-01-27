@@ -111,6 +111,9 @@ def get_loader_class(class_name: str, module_prefix: str = 'src.loaders') -> Typ
     # Built-in loaders
     builtin_loaders = {
         'JSONDataLoader': 'json_loader',
+        'MultimodalJSONDataLoader': 'json_loader',
+        'JSONLDataLoader': 'jsonl_loader',
+        'MultimodalJSONLDataLoader': 'jsonl_loader',
         'CSVDataLoader': 'csv_loader',
         'PromptListLoader': 'prompt_list_loader',
     }
@@ -148,6 +151,7 @@ def get_saver_class(class_name: str, module_prefix: str = 'src.savers') -> Type[
     # Built-in savers
     builtin_savers = {
         'JSONResultSaver': 'json_saver',
+        'JSONLResultSaver': 'jsonl_saver',
         'CSVResultSaver': 'csv_saver',
         'ConsoleResultSaver': 'console_saver',
     }

@@ -1,0 +1,58 @@
+# Example configuration for multimodal (vision) batch inference
+# This config demonstrates using MultimodalJSONLDataLoader for vision tasks
+
+loader:
+  class: MultimodalJSONLDataLoader
+  params:
+    # Path to JSONL file containing prompts and image paths
+    file_path: data/vision_prompts.jsonl
+
+    # Field names in the JSONL file
+    prompt_field: prompt      # Field containing the text prompt
+    id_field: id              # Field containing the unique ID
+    image_field: image        # Field for single image (takes precedence)
+    images_field: images      # Field for multiple images
+
+    # Image handling
+    image_base_dir: data/images  # Base directory for relative image paths
+    encode_images: true           # Encode images to base64 (set false for URLs)
+
+saver:
+  class: JSONLResultSaver
+  params:
+    output_path: results/vision_results.jsonl
+
+runner:
+  # Model settings (use a vision-capable model)
+  model_name: llava-hf/llava-1.5-7b-hf
+  temperature: 0.7
+  max_tokens: 512
+  system_prompt: "You are a helpful vision assistant."
+
+  # Concurrency
+  max_concurrency: 5
+  max_retries: 3
+  retry_delay: 2.0
+  request_timeout: 180  # Vision models may need more time
+
+  # Rollouts (for consistency testing)
+  num_rollouts: 1
+
+  # Server management
+  servers_dir: ./servers
+  load_balancing_strategy: round_robin  # Options: round_robin, least_connections, random
+
+  # Progress reporting
+  progress_report_interval: 5
+
+  # Adapter (OpenAI adapter supports vision API)
+  adapter_class: OpenAIAdapter
+
+  # Checkpoint (for resumable processing)
+  enable_checkpoint: true
+  checkpoint_path: checkpoints/vision_checkpoint.json
+  checkpoint_interval: 10
+
+logging:
+  level: INFO
+  file: logs/vision_inference.log

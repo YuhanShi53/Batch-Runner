@@ -1,7 +1,8 @@
 """
-JSON file data loader implementation.
+JSONL file data loader implementation.
 
-Loads inference requests from a JSON file.
+Loads inference requests from a JSONL file.
+Each line is a separate JSON object representing one data sample.
 
 Supports both text-only and multimodal (text + images) data.
 """
@@ -17,40 +18,55 @@ from .multimodal_base import MultimodalDataLoader, MultimodalLoadResult
 logger = logging.getLogger(__name__)
 
 
-class JSONDataLoader(DataLoader):
+class JSONLDataLoader(DataLoader):
     """
-    Load inference requests from a JSON file (text-only mode).
+    Load inference requests from a JSONL file (text-only mode).
 
-    Expected JSON format:
-    [
-        {"id": "1", "prompt": "What is AI?", "category": "tech"},
-        {"id": "2", "prompt": "Explain quantum computing"}
-    ]
+    Expected JSONL format (one JSON object per line):
+    {"id": "1", "prompt": "What is AI?", "category": "tech"}
+    {"id": "2", "prompt": "Explain quantum computing"}
+    {"id": "3", "prompt": "Tell me a joke", "tags": ["humor"]}
 
     Configuration:
-        file_path: Path to JSON file
-        batch_size: Number of items to load at once (default: 1)
+        file_path: Path to JSONL file
         prompt_field: Field name containing the prompt (default: "prompt")
         id_field: Field name containing the ID (default: "id")
+        multimodal: Set to True to enable multimodal support (default: False)
+        image_base_dir: Base directory for relative image paths (default: "")
+        encode_images: Whether to encode images to base64 (default: True)
+
+    For multimodal mode, set multimodal: True in config.
+    See MultimodalJSONLDataLoader for details.
     """
 
     def _initialize(self):
-        """Initialize JSON file loader."""
+        """Initialize JSONL file loader."""
         self.file_path = Path(self.config['file_path'])
         self.prompt_field = self.config.get('prompt_field', 'prompt')
         self.id_field = self.config.get('id_field', 'id')
 
         if not self.file_path.exists():
-            raise FileNotFoundError(f"JSON file not found: {self.file_path}")
+            raise FileNotFoundError(f"JSONL file not found: {self.file_path}")
 
+        # Load all lines into memory
+        self.data = []
         with open(self.file_path, 'r', encoding='utf-8') as f:
-            self.data = json.load(f)
+            for line_num, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:  # Skip empty lines
+                    continue
 
-        if not isinstance(self.data, list):
-            raise ValueError("JSON root must be a list of objects")
+                try:
+                    obj = json.loads(line)
+                    self.data.append(obj)
+                except json.JSONDecodeError as e:
+                    raise ValueError(f"Invalid JSON on line {line_num}: {e}")
+
+        if not self.data:
+            raise ValueError(f"No valid JSON objects found in {self.file_path}")
 
     def load(self) -> Iterator[LoadResult]:
-        """Yield LoadResult objects from JSON data."""
+        """Yield LoadResult objects from JSONL data."""
         for item in self.data:
             prompt = item.get(self.prompt_field)
             request_id = item.get(self.id_field, f"req_{id(item)}")
@@ -74,21 +90,28 @@ class JSONDataLoader(DataLoader):
         return len(self.data)
 
 
-class MultimodalJSONDataLoader(MultimodalDataLoader):
+class MultimodalJSONLDataLoader(MultimodalDataLoader):
     """
-    Load multimodal inference requests from a JSON file.
+    Load multimodal inference requests from a JSONL file.
 
     Supports text + image data in OpenAI vision API format.
 
-    Expected JSON format:
-    [
-        {"id": "1", "prompt": "What is AI?"},
-        {"id": "2", "prompt": "Describe this image", "image": "path/to/image.jpg"},
-        {"id": "3", "prompt": "Compare these", "images": ["img1.jpg", "img2.png"]}
-    ]
+    Expected JSONL format (one JSON object per line):
+
+    Text-only:
+    {"id": "1", "prompt": "What is AI?"}
+
+    Single image:
+    {"id": "2", "prompt": "Describe this image", "image": "path/to/image.jpg"}
+
+    Multiple images:
+    {"id": "3", "prompt": "Compare these images", "images": ["img1.jpg", "img2.png"]}
+
+    Mixed (image field takes precedence over images):
+    {"id": "4", "prompt": "What's in this image?", "image": "photo.jpg", "images": ["other.jpg"]}
 
     Configuration:
-        file_path: Path to JSON file
+        file_path: Path to JSONL file
         prompt_field: Field name containing the text prompt (default: "prompt")
         id_field: Field name containing the ID (default: "id")
         image_field: Field name for single image (default: "image")
@@ -103,9 +126,11 @@ class MultimodalJSONDataLoader(MultimodalDataLoader):
     """
 
     def _initialize(self):
-        """Initialize multimodal JSON file loader."""
+        """Initialize multimodal JSONL file loader."""
+        # Initialize multimodal base
         super()._initialize()
 
+        # JSONL-specific config
         self.file_path = Path(self.config['file_path'])
         self.prompt_field = self.config.get('prompt_field', 'prompt')
         self.id_field = self.config.get('id_field', 'id')
@@ -113,20 +138,31 @@ class MultimodalJSONDataLoader(MultimodalDataLoader):
         self.images_field = self.config.get('images_field', 'images')
 
         if not self.file_path.exists():
-            raise FileNotFoundError(f"JSON file not found: {self.file_path}")
+            raise FileNotFoundError(f"JSONL file not found: {self.file_path}")
 
+        # Load all lines into memory
+        self.data = []
         with open(self.file_path, 'r', encoding='utf-8') as f:
-            self.data = json.load(f)
+            for line_num, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:
+                    continue
 
-        if not isinstance(self.data, list):
-            raise ValueError("JSON root must be a list of objects")
+                try:
+                    obj = json.loads(line)
+                    self.data.append(obj)
+                except json.JSONDecodeError as e:
+                    raise ValueError(f"Invalid JSON on line {line_num}: {e}")
+
+        if not self.data:
+            raise ValueError(f"No valid JSON objects found in {self.file_path}")
 
     def _extract_images(self, item: Dict[str, Any]) -> Optional[List[str]]:
         """
-        Extract image paths from a JSON item.
+        Extract image paths from a JSONL item.
 
         Args:
-            item: Dictionary representing one JSON object
+            item: Dictionary representing one JSONL line
 
         Returns:
             List of image paths/strings, or None if no images present
@@ -135,6 +171,7 @@ class MultimodalJSONDataLoader(MultimodalDataLoader):
         if self.image_field in item:
             image_value = item[self.image_field]
             if image_value:
+                # Convert single value to list
                 if isinstance(image_value, str):
                     return [image_value]
                 elif isinstance(image_value, list):
@@ -156,7 +193,7 @@ class MultimodalJSONDataLoader(MultimodalDataLoader):
         return None
 
     def load(self) -> Iterator[MultimodalLoadResult]:
-        """Yield MultimodalLoadResult objects from JSON data."""
+        """Yield MultimodalLoadResult objects from JSONL data."""
         for item in self.data:
             prompt = item.get(self.prompt_field)
             request_id = item.get(self.id_field, f"req_{id(item)}")

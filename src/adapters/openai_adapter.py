@@ -15,9 +15,17 @@ class OpenAIAdapter(ModelAdapter):
 
     This is the standard format used by:
     - OpenAI API
-    - vLLM
+    - vLLM (including vision models)
     - Azure OpenAI
     - Many OpenAI-compatible providers
+
+    Multimodal Support:
+    This adapter fully supports OpenAI's vision API format. Messages can contain:
+    - Text content: {"type": "text", "text": "..."}
+    - Image content: {"type": "image_url", "image_url": {"url": "..."}
+
+    The build_request() method passes through messages as-is, so any multimodal
+    content format created by loaders will be forwarded to the API correctly.
     """
 
     def build_request(
