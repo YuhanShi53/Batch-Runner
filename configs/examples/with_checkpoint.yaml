@@ -1,0 +1,25 @@
+# Example configuration with checkpoint enabled
+# Demonstrates resumable batch processing
+
+loader:
+  class: JSONDataLoader
+  params:
+    file_path: data/input.json
+
+saver:
+  class: JSONResultSaver
+  params:
+    output_path: outputs/results.json
+
+runner:
+  max_concurrency: 10
+  model_name: meta-llama/Llama-2-7b-chat-hf
+  servers_dir: ./vllm_servers
+
+  # Enable checkpoint for resumable processing
+  enable_checkpoint: true
+  checkpoint_path: checkpoints/my_job_checkpoint.json
+  checkpoint_interval: 50  # Save every 50 requests
+
+logging:
+  level: INFO

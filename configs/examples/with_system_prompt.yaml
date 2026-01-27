@@ -1,0 +1,26 @@
+# Example configuration with system prompt
+# Demonstrates how to set a custom system prompt for all requests
+
+loader:
+  class: PromptListLoader
+  params:
+    prompts:
+      - "What is the capital of France?"
+      - "Explain quantum computing"
+      - "Write a haiku about artificial intelligence"
+
+saver:
+  class: JSONResultSaver
+  params:
+    output_path: outputs/results_with_system_prompt.json
+
+runner:
+  max_concurrency: 10
+  model_name: meta-llama/Llama-2-7b-chat-hf
+  temperature: 0.7
+  max_tokens: 1000
+  system_prompt: "You are a helpful assistant that provides accurate and concise answers."
+  servers_dir: ./vllm_servers
+
+logging:
+  level: INFO

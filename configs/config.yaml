@@ -1,0 +1,59 @@
+# vLLM Batch Runner Configuration
+
+# DataLoader Configuration
+loader:
+  class: JSONDataLoader  # Options: JSONDataLoader, CSVDataLoader, PromptListLoader
+  params:
+    file_path: data/input.json
+    prompt_field: prompt
+    id_field: id
+
+# ResultSaver Configuration
+saver:
+  class: JSONResultSaver  # Options: JSONResultSaver, CSVResultSaver, ConsoleResultSaver
+  params:
+    output_path: outputs/results.json
+    batch_size: 100
+    pretty_print: true
+
+# Batch Runner Configuration
+runner:
+  # Concurrency settings
+  max_concurrency: 10
+  max_retries: 3
+  retry_delay: 1.0
+  request_timeout: 120
+
+  # Rollouts (number of times to run each sample)
+  num_rollouts: 1
+
+  # Model parameters
+  model_name: meta-llama/Llama-2-7b-chat-hf
+  temperature: 0.7
+  max_tokens: 1000
+  system_prompt: ""  # Optional: Set a system prompt for all requests
+  top_p: 1.0
+  frequency_penalty: 0.0
+  presence_penalty: 0.0
+
+  # Server configuration
+  servers_dir: ./vllm_servers
+  load_balancing_strategy: round_robin  # Options: round_robin, least_connections, random
+
+  # Model adapter configuration
+  adapter_class: OpenAIAdapter  # Options: OpenAIAdapter, SimpleAdapter, or custom
+  adapter_params: {}  # Additional parameters to pass to adapter
+
+  # Progress tracking
+  progress_report_interval: 10
+
+  # Checkpoint configuration (for resumable batch processing)
+  enable_checkpoint: false  # Set to true to enable checkpoint/resume functionality
+  checkpoint_path: checkpoints/batch_checkpoint.json
+  checkpoint_interval: 10  # Save checkpoint every N completions
+
+# Logging Configuration
+logging:
+  level: INFO  # Options: DEBUG, INFO, WARNING, ERROR
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: logs/batch_runner.log

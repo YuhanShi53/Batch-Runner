@@ -1,0 +1,29 @@
+# Example configuration for simple prompt-based API
+# Uses SimpleAdapter for APIs that don't use OpenAI message format
+
+loader:
+  class: PromptListLoader
+  params:
+    prompts:
+      - "What is the capital of France?"
+      - "Explain quantum computing"
+      - "Write a haiku about AI"
+
+saver:
+  class: JSONResultSaver
+  params:
+    output_path: outputs/simple_api_results.json
+
+runner:
+  max_concurrency: 5
+  model_name: my-model
+  temperature: 0.7
+  max_tokens: 500
+  servers_dir: ./vllm_servers
+
+  # Use SimpleAdapter for prompt-based APIs
+  adapter_class: SimpleAdapter
+  adapter_params: {}
+
+logging:
+  level: INFO
