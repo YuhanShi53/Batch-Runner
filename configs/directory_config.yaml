@@ -1,0 +1,74 @@
+# vLLM Batch Runner Configuration - Directory Tree Mode
+# This configuration reads conv.jsonl files from a directory tree and writes
+# results to an output directory while preserving the directory structure.
+
+# DataLoader Configuration
+loader:
+  class: DirectoryJSONLDataLoader
+  params:
+    input_dir: data/input  # Root directory containing conv.jsonl files
+    file_pattern: conv.jsonl  # File pattern to search for (default: conv.jsonl)
+    prompt_field: prompt  # Field name containing the prompt text
+    id_field: id  # Field name containing the ID
+    recursive: true  # Whether to search subdirectories (default: true)
+
+# ResultSaver Configuration
+saver:
+  class: DirectoryJSONLResultSaver
+  params:
+    output_dir: data/output  # Root output directory
+    output_file_pattern: result.jsonl  # Default output filename
+    preserve_structure: true  # Mirror input directory structure (default: true)
+    # Optional: Custom output filename pattern
+    # Use {source} to reference the source filename without extension
+    # Examples:
+    #   output_filename: "{source}.out"  # conv.jsonl -> conv.jsonl.out
+    #   output_filename: "result_{source}.jsonl"  # conv.jsonl -> result_conv.jsonl
+    #   output_filename: "results.jsonl"  # Always use results.jsonl
+
+# Batch Runner Configuration
+runner:
+  # Concurrency settings
+  max_concurrency: 10
+  max_retries: 3
+  retry_delay: 1.0
+  request_timeout: 120
+
+  # Rollouts (number of times to run each sample)
+  num_rollouts: 1
+
+  # Model parameters
+  model_name: meta-llama/Llama-2-7b-chat-hf
+  temperature: 0.7
+  max_tokens: 1000
+  system_prompt: ""  # Optional: Set a system prompt for all requests
+  top_p: 1.0
+  frequency_penalty: 0.0
+  presence_penalty: 0.0
+
+  # Server configuration
+  servers_dir: ./vllm_servers
+  load_balancing_strategy: round_robin  # Options: round_robin, least_connections, random
+
+  # Health check configuration
+  health_check_interval: 30  # Seconds between health checks
+  max_failures: 5  # Max consecutive failures before marking server as unhealthy
+  allow_unhealthy_fallback: false  # If true, allows routing to unhealthy servers when no healthy ones available
+
+  # Model adapter configuration
+  adapter_class: OpenAIAdapter  # Options: OpenAIAdapter, SimpleAdapter, or custom
+  adapter_params: {}  # Additional parameters to pass to adapter
+
+  # Progress tracking
+  progress_report_interval: 10
+
+  # Checkpoint configuration (for resumable batch processing)
+  enable_checkpoint: false  # Set to true to enable checkpoint/resume functionality
+  checkpoint_path: checkpoints/batch_checkpoint.json
+  checkpoint_interval: 10  # Save checkpoint every N completions
+
+# Logging Configuration
+logging:
+  level: INFO  # Options: DEBUG, INFO, WARNING, ERROR
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: logs/batch_runner.log

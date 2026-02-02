@@ -119,6 +119,8 @@ def get_loader_class(class_name: str, module_prefix: str = 'src.loaders') -> Typ
         'MultimodalJSONLDataLoader': 'jsonl_loader',
         'CSVDataLoader': 'csv_loader',
         'PromptListLoader': 'prompt_list_loader',
+        'DirectoryJSONLDataLoader': 'directory_jsonl_loader',
+        'MultimodalDirectoryJSONLDataLoader': 'directory_jsonl_loader',
     }
 
     if class_name not in builtin_loaders:
@@ -157,6 +159,7 @@ def get_saver_class(class_name: str, module_prefix: str = 'src.savers') -> Type[
         'JSONLResultSaver': 'jsonl_saver',
         'CSVResultSaver': 'csv_saver',
         'ConsoleResultSaver': 'console_saver',
+        'DirectoryJSONLResultSaver': 'directory_jsonl_saver',
     }
 
     if class_name not in builtin_savers:
