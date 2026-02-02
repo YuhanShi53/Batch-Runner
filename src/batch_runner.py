@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 import logging
+import queue
 
 try:
     import requests
@@ -67,6 +68,10 @@ class BatchConfig:
     enable_checkpoint: bool = False
     checkpoint_path: str = "checkpoints/batch_checkpoint.json"
     checkpoint_interval: int = 10
+
+    # Streaming settings
+    streaming: bool = True
+    stream_queue_size: int = 100  # Max items in buffer queue for backpressure
 
     def get(self, key: str, default=None):
         """Get config value with default fallback."""
@@ -192,8 +197,9 @@ class BatchRunner:
             report_interval=config.progress_report_interval
         )
 
-        # Request queue
-        self._request_queue: List[LoadResult] = []
+        # Request queue (list for non-streaming, queue.Queue for streaming)
+        self._request_queue: Optional[queue.Queue] = None
+        self._request_list: List[LoadResult] = []  # For non-streaming mode
         self._lock = threading.Lock()
 
     def _estimate_total_items(self) -> int:
@@ -210,6 +216,16 @@ class BatchRunner:
         self.logger.info(f"Rollouts per sample: {self.config.num_rollouts}")
         self.logger.info(f"Healthy servers: {self.server_manager.get_server_count()}")
 
+        streaming_mode = self.config.get('streaming', True)
+        if streaming_mode:
+            self.logger.info("Running in STREAMING mode (pipeline processing)")
+            self._run_streaming()
+        else:
+            self.logger.info("Running in BATCH mode (pre-load all data)")
+            self._run_batch()
+
+    def _run_batch(self):
+        """Original batch mode: load all data first, then process."""
         # Load all data into queue
         for item in self.loader:
             for rollout_idx in range(self.config.num_rollouts):
@@ -218,9 +234,9 @@ class BatchRunner:
                     request_id=f"{item.request_id}_rollout_{rollout_idx}",
                     additional_data=item.additional_data
                 )
-                self._request_queue.append(rollout_result)
+                self._request_list.append(rollout_result)
 
-        total_requests = len(self._request_queue)
+        total_requests = len(self._request_list)
         self.stats.total_requests = total_requests
         self.logger.info(f"Total requests to process: {total_requests}")
 
@@ -239,17 +255,17 @@ class BatchRunner:
 
                 # Filter out completed requests
                 pending_requests = [
-                    req for req in self._request_queue
+                    req for req in self._request_list
                     if not self.checkpoint_manager.is_completed(req.request_id)
                 ]
-                self._request_queue = pending_requests
-                self.logger.info(f"Pending requests to process: {len(self._request_queue)}")
+                self._request_list = pending_requests
+                self.logger.info(f"Pending requests to process: {len(self._request_list)}")
 
                 # Update progress tracker to account for completed items
                 for _ in range(completed_count):
                     self.progress_tracker.update(1)
 
-            if not self._request_queue:
+            if not self._request_list:
                 self.logger.info("All requests already completed!")
                 self.stats.end_time = time.time()
                 self._print_summary()
@@ -259,7 +275,7 @@ class BatchRunner:
         with ThreadPoolExecutor(max_workers=self.config.max_concurrency) as executor:
             futures = {
                 executor.submit(self._process_request, request): request
-                for request in self._request_queue
+                for request in self._request_list
             }
 
             for future in as_completed(futures):
@@ -272,6 +288,140 @@ class BatchRunner:
                         self.checkpoint_manager.mark_failed()
 
         # Finalize
+        self._finalize_batch(total_requests)
+
+    def _run_streaming(self):
+        """Streaming mode: producer-consumer pipeline with bounded queue."""
+        queue_size = self.config.get('stream_queue_size', 100)
+        request_queue: queue.Queue = queue.Queue(maxsize=queue_size)
+
+        # Producer thread: loads data from loader
+        # Consumer threads: ThreadPoolExecutor processes requests
+
+        producer_exception = []
+        total_requests = [0]  # Use list for mutability in nested function
+        skipped_count = [0]   # Track skipped requests (checkpoint resume)
+
+        # Load checkpoint if enabled
+        if self.checkpoint_manager:
+            # We don't know total yet in streaming mode, use 0 initially
+            checkpoint_data = self.checkpoint_manager.load_or_create(0)
+            completed_count = checkpoint_data.completed_count
+
+            if completed_count > 0:
+                self.logger.info(f"Resuming from checkpoint: {completed_count} requests were completed")
+                # Restore stats from checkpoint
+                self.stats.completed_requests = checkpoint_data.completed_count
+                self.stats.failed_requests = checkpoint_data.failed_count
+                self.stats.retried_requests = checkpoint_data.retried_count
+                self.stats.total_tokens = checkpoint_data.total_tokens
+
+                # Update progress tracker to account for completed items
+                for _ in range(completed_count):
+                    self.progress_tracker.update(1)
+
+        def producer():
+            """Producer thread: stream data from loader into queue."""
+            try:
+                for item in self.loader:
+                    # Create rollouts
+                    for rollout_idx in range(self.config.num_rollouts):
+                        rollout_result = LoadResult(
+                            messages=item.messages,
+                            request_id=f"{item.request_id}_rollout_{rollout_idx}",
+                            additional_data=item.additional_data
+                        )
+
+                        # Block if queue is full (backpressure)
+                        request_queue.put(rollout_result)
+                        total_requests[0] += 1
+
+                self.logger.info(f"Producer finished: {total_requests[0]} requests queued")
+            except Exception as e:
+                self.logger.error(f"Producer thread error: {e}")
+                producer_exception.append(e)
+            finally:
+                # Signal end of data
+                request_queue.put(None)  # Sentinel value
+
+        # Start producer thread
+        producer_thread = threading.Thread(target=producer, daemon=True)
+        producer_thread.start()
+
+        # Initialize stats for checkpoint
+        self.stats.total_requests = 0  # Will be updated as we consume
+        processed_count = 0
+
+        # Consumer: process requests with thread pool
+        with ThreadPoolExecutor(max_workers=self.config.max_concurrency) as executor:
+            futures = []
+
+            while True:
+                # Get next request (blocks with timeout)
+                try:
+                    request = request_queue.get(timeout=1.0)
+                except queue.Empty:
+                    # Check if producer is still alive
+                    if producer_exception:
+                        raise producer_exception[0]
+                    if producer_thread.is_alive():
+                        continue
+                    # Producer finished but queue might still have items
+                    try:
+                        request = request_queue.get_nowait()
+                    except queue.Empty:
+                        break
+
+                # Check for sentinel (end of stream)
+                if request is None:
+                    break
+
+                # Skip if already completed (checkpoint resume)
+                if self.checkpoint_manager and self.checkpoint_manager.is_completed(request.request_id):
+                    self.logger.debug(f"Skipping already completed: {request.request_id}")
+                    skipped_count[0] += 1
+                    request_queue.task_done()
+                    continue
+
+                # Submit for processing
+                future = executor.submit(self._process_request, request)
+                futures.append(future)
+                processed_count += 1
+
+                # Update progress periodically
+                if processed_count % 100 == 0:
+                    self.logger.info(f"Queued {processed_count} requests for processing...")
+
+                # Clean up completed futures to prevent memory buildup
+                futures = [f for f in futures if not f.done()]
+
+            # Wait for all remaining futures
+            self.logger.info(f"Waiting for {len(futures)} remaining requests to complete...")
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except Exception as e:
+                    self.logger.error(f"Request processing failed: {e}")
+                    self.stats.increment_failed()
+                    if self.checkpoint_manager:
+                        self.checkpoint_manager.mark_failed()
+
+        # Wait for producer to finish
+        producer_thread.join(timeout=5.0)
+        if producer_exception:
+            raise producer_exception[0]
+
+        if skipped_count[0] > 0:
+            self.logger.info(f"Skipped {skipped_count[0]} already completed requests (checkpoint resume)")
+
+        # Update total count now that we know it
+        self.stats.total_requests = total_requests[0]
+
+        # Finalize
+        self._finalize_batch(total_requests[0])
+
+    def _finalize_batch(self, total_requests: int):
+        """Common finalization logic for both batch and streaming modes."""
         self.stats.end_time = time.time()
         self.saver.cleanup()
         self.progress_tracker.finalize()

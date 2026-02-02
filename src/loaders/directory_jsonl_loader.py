@@ -54,6 +54,7 @@ class DirectoryJSONLDataLoader(DataLoader):
         self.id_field = self.config.get('id_field', 'id')
         self.recursive = self.config.get('recursive', True)
         self.multimodal = self.config.get('multimodal', False)
+        self.streaming = self.config.get('streaming', True)  # Enable streaming by default
 
         if not self.input_dir.exists():
             raise FileNotFoundError(f"Input directory not found: {self.input_dir}")
@@ -63,9 +64,9 @@ class DirectoryJSONLDataLoader(DataLoader):
 
         # Find all conv.jsonl files
         if self.recursive:
-            self.files = list(self.input_dir.rglob(self.file_pattern))
+            self.files = sorted(self.input_dir.rglob(self.file_pattern))
         else:
-            self.files = list(self.input_dir.glob(self.file_pattern))
+            self.files = sorted(self.input_dir.glob(self.file_pattern))
 
         if not self.files:
             raise ValueError(
@@ -74,61 +75,108 @@ class DirectoryJSONLDataLoader(DataLoader):
 
         logger.info(f"Found {len(self.files)} {self.file_pattern} files in {self.input_dir}")
 
-        # Load all data into memory with source information
-        self.data = []
-        for file_path in self.files:
-            # Calculate relative path for output reconstruction
-            rel_path = file_path.relative_to(self.input_dir)
-            rel_dir = rel_path.parent
+        # For backwards compatibility, support non-streaming mode
+        if not self.streaming:
+            logger.info("Non-streaming mode: loading all data into memory")
+            self.data = []
+            for file_path in self.files:
+                rel_path = file_path.relative_to(self.input_dir)
+                rel_dir = rel_path.parent
 
-            with open(file_path, 'r', encoding='utf-8') as f:
-                for line_num, line in enumerate(f, 1):
-                    line = line.strip()
-                    if not line:  # Skip empty lines
-                        continue
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    for line_num, line in enumerate(f, 1):
+                        line = line.strip()
+                        if not line:
+                            continue
 
-                    try:
-                        obj = json.loads(line)
-                        # Add source information
-                        obj['_source_file'] = str(rel_path)
-                        obj['_source_dir'] = str(rel_dir) if rel_dir != Path('.') else ''
-                        self.data.append(obj)
-                    except json.JSONDecodeError as e:
-                        logger.warning(
-                            f"Invalid JSON in {rel_path}:{line_num}: {e}"
-                        )
-                        continue
+                        try:
+                            obj = json.loads(line)
+                            obj['_source_file'] = str(rel_path)
+                            obj['_source_dir'] = str(rel_dir) if rel_dir != Path('.') else ''
+                            self.data.append(obj)
+                        except json.JSONDecodeError as e:
+                            logger.warning(f"Invalid JSON in {rel_path}:{line_num}: {e}")
+                            continue
 
-        if not self.data:
-            raise ValueError(f"No valid JSON objects found in {self.input_dir}")
+            if not self.data:
+                raise ValueError(f"No valid JSON objects found in {self.input_dir}")
 
-        logger.info(f"Loaded {len(self.data)} items from {len(self.files)} files")
+            logger.info(f"Loaded {len(self.data)} items from {len(self.files)} files into memory")
+        else:
+            logger.info(f"Streaming mode enabled: will process files on-demand")
 
     def load(self) -> Iterator[LoadResult]:
         """Yield LoadResult objects from directory JSONL data."""
-        for item in self.data:
-            prompt = item.get(self.prompt_field)
-            request_id = item.get(self.id_field, f"req_{id(item)}")
+        # In non-streaming mode, iterate over pre-loaded data
+        if not self.streaming:
+            for item in self.data:
+                prompt = item.get(self.prompt_field)
+                request_id = item.get(self.id_field, f"req_{id(item)}")
 
-            if prompt is None:
-                logger.debug(f"Skipping item {request_id}: no '{self.prompt_field}' field")
+                if prompt is None:
+                    logger.debug(f"Skipping item {request_id}: no '{self.prompt_field}' field")
+                    continue
+
+                additional_data = {
+                    k: v for k, v in item.items()
+                    if k not in [self.prompt_field, self.id_field]
+                }
+
+                yield LoadResult(
+                    messages=[{"role": "user", "content": prompt}],
+                    request_id=str(request_id),
+                    additional_data=additional_data or None
+                )
+            return
+
+        # Streaming mode: read files on-demand
+        for file_path in self.files:
+            rel_path = file_path.relative_to(self.input_dir)
+            rel_dir = rel_path.parent
+
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    for line_num, line in enumerate(f, 1):
+                        line = line.strip()
+                        if not line:
+                            continue
+
+                        try:
+                            obj = json.loads(line)
+                            # Add source information
+                            obj['_source_file'] = str(rel_path)
+                            obj['_source_dir'] = str(rel_dir) if rel_dir != Path('.') else ''
+
+                            prompt = obj.get(self.prompt_field)
+                            request_id = obj.get(self.id_field, f"{rel_path}:{line_num}")
+
+                            if prompt is None:
+                                logger.debug(f"Skipping item {request_id}: no '{self.prompt_field}' field")
+                                continue
+
+                            # Extract additional data (everything except prompt and id)
+                            additional_data = {
+                                k: v for k, v in obj.items()
+                                if k not in [self.prompt_field, self.id_field]
+                            }
+
+                            yield LoadResult(
+                                messages=[{"role": "user", "content": prompt}],
+                                request_id=str(request_id),
+                                additional_data=additional_data or None
+                            )
+                        except json.JSONDecodeError as e:
+                            logger.warning(f"Invalid JSON in {rel_path}:{line_num}: {e}")
+                            continue
+            except IOError as e:
+                logger.error(f"Error reading file {rel_path}: {e}")
                 continue
 
-            # Extract additional data (everything except prompt and id)
-            # Keep _source_file and _source_dir for output reconstruction
-            additional_data = {
-                k: v for k, v in item.items()
-                if k not in [self.prompt_field, self.id_field]
-            }
-
-            yield LoadResult(
-                messages=[{"role": "user", "content": prompt}],
-                request_id=str(request_id),
-                additional_data=additional_data or None
-            )
-
     def __len__(self):
-        return len(self.data)
+        if not self.streaming:
+            return len(self.data)
+        # In streaming mode, we don't know the total count upfront
+        raise NotImplementedError("Cannot get length in streaming mode")
 
 
 class MultimodalDirectoryJSONLDataLoader(MultimodalDataLoader):
@@ -192,6 +240,7 @@ class MultimodalDirectoryJSONLDataLoader(MultimodalDataLoader):
         self.image_field = self.config.get('image_field', 'image')
         self.images_field = self.config.get('images_field', 'images')
         self.recursive = self.config.get('recursive', True)
+        self.streaming = self.config.get('streaming', True)  # Enable streaming by default
 
         # If image_base_dir is not specified, we'll use the directory of each conv.jsonl file
         self.use_source_dir_as_base = not self.config.get('image_base_dir', '')
@@ -202,11 +251,11 @@ class MultimodalDirectoryJSONLDataLoader(MultimodalDataLoader):
         if not self.input_dir.is_dir():
             raise ValueError(f"Input path is not a directory: {self.input_dir}")
 
-        # Find all conv.jsonl files
+        # Find all conv.jsonl files (sorted for deterministic order)
         if self.recursive:
-            self.files = list(self.input_dir.rglob(self.file_pattern))
+            self.files = sorted(self.input_dir.rglob(self.file_pattern))
         else:
-            self.files = list(self.input_dir.glob(self.file_pattern))
+            self.files = sorted(self.input_dir.glob(self.file_pattern))
 
         if not self.files:
             raise ValueError(
@@ -215,37 +264,37 @@ class MultimodalDirectoryJSONLDataLoader(MultimodalDataLoader):
 
         logger.info(f"Found {len(self.files)} {self.file_pattern} files in {self.input_dir}")
 
-        # Load all data into memory with source information
-        self.data = []
-        for file_path in self.files:
-            # Calculate relative path for output reconstruction
-            rel_path = file_path.relative_to(self.input_dir)
-            rel_dir = rel_path.parent
-            source_dir = file_path.parent
+        # For backwards compatibility, support non-streaming mode
+        if not self.streaming:
+            logger.info("Non-streaming mode: loading all data into memory")
+            self.data = []
+            for file_path in self.files:
+                rel_path = file_path.relative_to(self.input_dir)
+                rel_dir = rel_path.parent
+                source_dir = file_path.parent
 
-            with open(file_path, 'r', encoding='utf-8') as f:
-                for line_num, line in enumerate(f, 1):
-                    line = line.strip()
-                    if not line:
-                        continue
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    for line_num, line in enumerate(f, 1):
+                        line = line.strip()
+                        if not line:
+                            continue
 
-                    try:
-                        obj = json.loads(line)
-                        # Add source information
-                        obj['_source_file'] = str(rel_path)
-                        obj['_source_dir'] = str(rel_dir) if rel_dir != Path('.') else ''
-                        obj['_source_dir_path'] = str(source_dir)  # Store for image resolution
-                        self.data.append(obj)
-                    except json.JSONDecodeError as e:
-                        logger.warning(
-                            f"Invalid JSON in {rel_path}:{line_num}: {e}"
-                        )
-                        continue
+                        try:
+                            obj = json.loads(line)
+                            obj['_source_file'] = str(rel_path)
+                            obj['_source_dir'] = str(rel_dir) if rel_dir != Path('.') else ''
+                            obj['_source_dir_path'] = str(source_dir)
+                            self.data.append(obj)
+                        except json.JSONDecodeError as e:
+                            logger.warning(f"Invalid JSON in {rel_path}:{line_num}: {e}")
+                            continue
 
-        if not self.data:
-            raise ValueError(f"No valid JSON objects found in {self.input_dir}")
+            if not self.data:
+                raise ValueError(f"No valid JSON objects found in {self.input_dir}")
 
-        logger.info(f"Loaded {len(self.data)} items from {len(self.files)} files")
+            logger.info(f"Loaded {len(self.data)} items from {len(self.files)} files into memory")
+        else:
+            logger.info(f"Streaming mode enabled: will process files on-demand")
 
     def _resolve_image_path(self, image_path: str, source_dir_path: str) -> str:
         """
@@ -326,35 +375,92 @@ class MultimodalDirectoryJSONLDataLoader(MultimodalDataLoader):
 
     def load(self) -> Iterator[MultimodalLoadResult]:
         """Yield MultimodalLoadResult objects from directory JSONL data."""
-        for item in self.data:
-            prompt = item.get(self.prompt_field)
-            request_id = item.get(self.id_field, f"req_{id(item)}")
+        # In non-streaming mode, iterate over pre-loaded data
+        if not self.streaming:
+            for item in self.data:
+                prompt = item.get(self.prompt_field)
+                request_id = item.get(self.id_field, f"req_{id(item)}")
 
-            if prompt is None:
-                logger.debug(f"Skipping item {request_id}: no '{self.prompt_field}' field")
+                if prompt is None:
+                    logger.debug(f"Skipping item {request_id}: no '{self.prompt_field}' field")
+                    continue
+
+                images = self._extract_images(item)
+
+                excluded_fields = {
+                    self.prompt_field, self.id_field,
+                    self.image_field, self.images_field,
+                    '_source_file', '_source_dir', '_source_dir_path'
+                }
+                additional_data = {
+                    k: v for k, v in item.items()
+                    if k not in excluded_fields
+                }
+
+                yield self._create_multimodal_result(
+                    text=prompt,
+                    images=images,
+                    request_id=str(request_id),
+                    additional_data=additional_data or None
+                )
+            return
+
+        # Streaming mode: read files on-demand
+        for file_path in self.files:
+            rel_path = file_path.relative_to(self.input_dir)
+            rel_dir = rel_path.parent
+            source_dir = file_path.parent
+
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    for line_num, line in enumerate(f, 1):
+                        line = line.strip()
+                        if not line:
+                            continue
+
+                        try:
+                            obj = json.loads(line)
+                            # Add source information
+                            obj['_source_file'] = str(rel_path)
+                            obj['_source_dir'] = str(rel_dir) if rel_dir != Path('.') else ''
+                            obj['_source_dir_path'] = str(source_dir)
+
+                            prompt = obj.get(self.prompt_field)
+                            request_id = obj.get(self.id_field, f"{rel_path}:{line_num}")
+
+                            if prompt is None:
+                                logger.debug(f"Skipping item {request_id}: no '{self.prompt_field}' field")
+                                continue
+
+                            # Extract and resolve images
+                            images = self._extract_images(obj)
+
+                            # Extract additional data
+                            excluded_fields = {
+                                self.prompt_field, self.id_field,
+                                self.image_field, self.images_field,
+                                '_source_file', '_source_dir', '_source_dir_path'
+                            }
+                            additional_data = {
+                                k: v for k, v in obj.items()
+                                if k not in excluded_fields
+                            }
+
+                            yield self._create_multimodal_result(
+                                text=prompt,
+                                images=images,
+                                request_id=str(request_id),
+                                additional_data=additional_data or None
+                            )
+                        except json.JSONDecodeError as e:
+                            logger.warning(f"Invalid JSON in {rel_path}:{line_num}: {e}")
+                            continue
+            except IOError as e:
+                logger.error(f"Error reading file {rel_path}: {e}")
                 continue
 
-            # Extract and resolve images
-            images = self._extract_images(item)
-
-            # Extract additional data (exclude prompt, id, image fields, and internal fields)
-            excluded_fields = {
-                self.prompt_field, self.id_field,
-                self.image_field, self.images_field,
-                '_source_file', '_source_dir', '_source_dir_path'
-            }
-            additional_data = {
-                k: v for k, v in item.items()
-                if k not in excluded_fields
-            }
-
-            # Create multimodal result
-            yield self._create_multimodal_result(
-                text=prompt,
-                images=images,
-                request_id=str(request_id),
-                additional_data=additional_data or None
-            )
-
     def __len__(self):
-        return len(self.data)
+        if not self.streaming:
+            return len(self.data)
+        # In streaming mode, we don't know the total count upfront
+        raise NotImplementedError("Cannot get length in streaming mode")
