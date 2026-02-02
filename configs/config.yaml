@@ -40,6 +40,11 @@ runner:
   servers_dir: ./vllm_servers
   load_balancing_strategy: round_robin  # Options: round_robin, least_connections, random
 
+  # Health check configuration
+  health_check_interval: 30  # Seconds between health checks
+  max_failures: 5  # Max consecutive failures before marking server as unhealthy
+  allow_unhealthy_fallback: false  # If true, allows routing to unhealthy servers when no healthy ones available
+
   # Model adapter configuration
   adapter_class: OpenAIAdapter  # Options: OpenAIAdapter, SimpleAdapter, or custom
   adapter_params: {}  # Additional parameters to pass to adapter

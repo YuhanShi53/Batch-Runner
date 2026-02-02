@@ -47,6 +47,9 @@ class BatchConfig:
     # Server settings
     servers_dir: str = "."
     load_balancing_strategy: str = "round_robin"
+    health_check_interval: int = 30
+    max_failures: int = 5
+    allow_unhealthy_fallback: bool = False
 
     # Progress settings
     progress_report_interval: int = 10
@@ -64,6 +67,10 @@ class BatchConfig:
     enable_checkpoint: bool = False
     checkpoint_path: str = "checkpoints/batch_checkpoint.json"
     checkpoint_interval: int = 10
+
+    def get(self, key: str, default=None):
+        """Get config value with default fallback."""
+        return getattr(self, key, default)
 
 
 @dataclass
@@ -149,12 +156,26 @@ class BatchRunner:
         # Initialize server manager and load balancer
         server_config = {
             'servers_dir': config.servers_dir,
-            'request_timeout': config.request_timeout
+            'request_timeout': config.request_timeout,
+            'health_check_interval': config.get('health_check_interval', 30),
+            'max_failures': config.get('max_failures', 5)
         }
         self.server_manager = VLLMServerManager(server_config)
+
+        # Register callback to update load balancer when server health changes
+        def on_server_state_change(_server, _is_healthy):
+            """Callback when server health state changes."""
+            # Update the load balancer with the latest server list
+            self.load_balancer.update_servers(self.server_manager.get_all_servers())
+
+        self.server_manager.register_state_change_callback(on_server_state_change)
+
+        # Initialize load balancer with current server list
+        allow_fallback = config.get('allow_unhealthy_fallback', False)
         self.load_balancer = LoadBalancer(
-            self.server_manager.get_healthy_servers(),
-            strategy=config.load_balancing_strategy
+            self.server_manager.get_all_servers(),
+            strategy=config.load_balancing_strategy,
+            allow_fallback=allow_fallback
         )
 
         # Initialize checkpoint manager if enabled

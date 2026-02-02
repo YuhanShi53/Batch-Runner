@@ -87,6 +87,9 @@ def _validate_config(config: Dict[str, Any]):
         'enable_checkpoint': False,
         'checkpoint_path': 'checkpoints/batch_checkpoint.json',
         'checkpoint_interval': 10,
+        'health_check_interval': 30,
+        'max_failures': 5,
+        'allow_unhealthy_fallback': False,
     }
 
     for key, value in runner_defaults.items():

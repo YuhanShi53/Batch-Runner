@@ -42,6 +42,11 @@ runner:
   servers_dir: ./servers
   load_balancing_strategy: round_robin  # Options: round_robin, least_connections, random
 
+  # Health check configuration
+  health_check_interval: 30  # Seconds between health checks
+  max_failures: 5  # Max consecutive failures before marking server as unhealthy
+  allow_unhealthy_fallback: false  # If true, allows routing to unhealthy servers when no healthy ones available
+
   # Progress reporting
   progress_report_interval: 5
 
