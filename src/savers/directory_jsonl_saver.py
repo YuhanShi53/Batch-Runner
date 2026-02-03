@@ -5,17 +5,14 @@ Saves inference results to output files while preserving the input
 directory structure. Results from the same source file are grouped
 into corresponding output files.
 """
-import json
 import threading
-from typing import Dict, Any
 from pathlib import Path
-from datetime import datetime
-from collections import defaultdict
 
 from .base import ResultSaver, SaveResult
+from .jsonl_mixin import JSONLSaverMixin
 
 
-class DirectoryJSONLResultSaver(ResultSaver):
+class DirectoryJSONLResultSaver(JSONLSaverMixin, ResultSaver):
     """
     Save inference results to JSONL files, preserving input directory structure.
 
@@ -34,6 +31,11 @@ class DirectoryJSONLResultSaver(ResultSaver):
         - Default: Creates "result.jsonl" in each directory
         - With output_filename="{source}.out": Converts "conv.jsonl" to "conv.jsonl.out"
         - With output_filename="results_{source}.jsonl": Converts to "results_conv.jsonl"
+
+    Customization:
+        Override methods from JSONLSaverMixin to customize output:
+        - format_result(): Customize the output dictionary structure
+        - serialize_output(): Customize JSON serialization
     """
 
     def _initialize(self):
@@ -107,22 +109,12 @@ class DirectoryJSONLResultSaver(ResultSaver):
 
         Thread-safe for concurrent writes. Results from the same source
         file are grouped together in the corresponding output location.
+        Uses the mixin's process_result_to_line template method.
         """
         output_path = self._get_output_path(result)
 
-        # Prepare output data
-        output_data = {
-            'request_id': result.request_id,
-            'model_output': result.model_output,
-            'additional_data': result.additional_data,
-            'timestamp': datetime.now().isoformat()
-        }
-
-        if result.error:
-            output_data['error'] = result.error
-
-        # Write as a single line JSON
-        line = json.dumps(output_data, ensure_ascii=False)
+        # Use the mixin's template method for processing
+        line = self.process_result_to_line(result)
 
         with self._lock:
             file_handle = self._get_file_handle(output_path)

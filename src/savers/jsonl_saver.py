@@ -4,16 +4,14 @@ JSONL file result saver implementation.
 Saves inference results to a JSONL file.
 Each result is written as a separate JSON object on its own line.
 """
-import json
 import threading
-from typing import Dict, Any
 from pathlib import Path
-from datetime import datetime
 
 from .base import ResultSaver, SaveResult
+from .jsonl_mixin import JSONLSaverMixin
 
 
-class JSONLResultSaver(ResultSaver):
+class JSONLResultSaver(JSONLSaverMixin, ResultSaver):
     """
     Save inference results to a JSONL file.
 
@@ -23,6 +21,20 @@ class JSONLResultSaver(ResultSaver):
     Configuration:
         output_path: Path to output JSONL file
         append: Whether to append to existing file (default: true)
+
+    Customization:
+        Override methods from JSONLSaverMixin to customize output:
+        - format_result(): Customize the output dictionary structure
+        - serialize_output(): Customize JSON serialization
+
+    Example:
+        class MySaver(JSONLResultSaver):
+            def format_result(self, result):
+                content = result.model_output['choices'][0]['message']['content']
+                return {
+                    "id": result.request_id,
+                    "response": content
+                }
     """
 
     def _initialize(self):
@@ -44,19 +56,10 @@ class JSONLResultSaver(ResultSaver):
 
         Each result is written as a JSON object on a separate line.
         Thread-safe for concurrent writes.
+        Uses the mixin's process_result_to_line template method.
         """
-        output_data = {
-            'request_id': result.request_id,
-            'model_output': result.model_output,
-            'additional_data': result.additional_data,
-            'timestamp': datetime.now().isoformat()
-        }
-
-        if result.error:
-            output_data['error'] = result.error
-
-        # Write as a single line JSON
-        line = json.dumps(output_data, ensure_ascii=False)
+        # Use the mixin's template method for processing
+        line = self.process_result_to_line(result)
 
         with self._lock:
             self.file.write(line + '\n')

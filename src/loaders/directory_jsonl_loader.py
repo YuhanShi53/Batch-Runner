@@ -12,13 +12,14 @@ from pathlib import Path
 import logging
 
 from .base import DataLoader, LoadResult
+from .jsonl_mixin import JSONLLoaderMixin
 from .multimodal_base import MultimodalDataLoader, MultimodalLoadResult
 
 
 logger = logging.getLogger(__name__)
 
 
-class DirectoryJSONLDataLoader(DataLoader):
+class DirectoryJSONLDataLoader(JSONLLoaderMixin, DataLoader):
     """
     Load inference requests from conv.jsonl files in a directory tree (text-only mode).
 
@@ -90,10 +91,13 @@ class DirectoryJSONLDataLoader(DataLoader):
                             continue
 
                         try:
-                            obj = json.loads(line)
-                            obj['_source_file'] = str(rel_path)
-                            obj['_source_dir'] = str(rel_dir) if rel_dir != Path('.') else ''
-                            self.data.append(obj)
+                            # Use the mixin's parse_line method for extensibility
+                            obj = self.parse_line(line, line_num, str(rel_path))
+                            if obj is not None:
+                                # Add source information
+                                obj['_source_file'] = str(rel_path)
+                                obj['_source_dir'] = str(rel_dir) if rel_dir != Path('.') else ''
+                                self.data.append(obj)
                         except json.JSONDecodeError as e:
                             logger.warning(f"Invalid JSON in {rel_path}:{line_num}: {e}")
                             continue
@@ -110,17 +114,13 @@ class DirectoryJSONLDataLoader(DataLoader):
         # In non-streaming mode, iterate over pre-loaded data
         if not self.streaming:
             for item in self.data:
-                prompt = item.get(self.prompt_field)
-                request_id = item.get(self.id_field, f"req_{id(item)}")
-
+                prompt = self.extract_prompt(item)
                 if prompt is None:
-                    logger.debug(f"Skipping item {request_id}: no '{self.prompt_field}' field")
+                    logger.debug(f"Skipping item: no '{self.prompt_field}' field")
                     continue
 
-                additional_data = {
-                    k: v for k, v in item.items()
-                    if k not in [self.prompt_field, self.id_field]
-                }
+                request_id = self.extract_request_id(item, f"req_{id(item)}")
+                additional_data = self.extract_additional_data(item)
 
                 yield LoadResult(
                     messages=[{"role": "user", "content": prompt}],
@@ -142,29 +142,26 @@ class DirectoryJSONLDataLoader(DataLoader):
                             continue
 
                         try:
-                            obj = json.loads(line)
-                            # Add source information
-                            obj['_source_file'] = str(rel_path)
-                            obj['_source_dir'] = str(rel_dir) if rel_dir != Path('.') else ''
+                            # Use the mixin's process_line_to_load_result template method
+                            result = self.process_line_to_load_result(
+                                line=line,
+                                line_num=line_num,
+                                source=str(rel_path),
+                                default_id=f"{rel_path}:{line_num}"
+                            )
 
-                            prompt = obj.get(self.prompt_field)
-                            request_id = obj.get(self.id_field, f"{rel_path}:{line_num}")
-
-                            if prompt is None:
-                                logger.debug(f"Skipping item {request_id}: no '{self.prompt_field}' field")
+                            if result is None:
+                                # Line was skipped by the mixin
                                 continue
 
-                            # Extract additional data (everything except prompt and id)
-                            additional_data = {
-                                k: v for k, v in obj.items()
-                                if k not in [self.prompt_field, self.id_field]
-                            }
+                            # Add source information to additional_data
+                            if result.additional_data is None:
+                                result.additional_data = {}
+                            result.additional_data['_source_file'] = str(rel_path)
+                            result.additional_data['_source_dir'] = str(rel_dir) if rel_dir != Path('.') else ''
 
-                            yield LoadResult(
-                                messages=[{"role": "user", "content": prompt}],
-                                request_id=str(request_id),
-                                additional_data=additional_data or None
-                            )
+                            yield result
+
                         except json.JSONDecodeError as e:
                             logger.warning(f"Invalid JSON in {rel_path}:{line_num}: {e}")
                             continue
@@ -179,7 +176,7 @@ class DirectoryJSONLDataLoader(DataLoader):
         raise NotImplementedError("Cannot get length in streaming mode")
 
 
-class MultimodalDirectoryJSONLDataLoader(MultimodalDataLoader):
+class MultimodalDirectoryJSONLDataLoader(JSONLLoaderMixin, MultimodalDataLoader):
     """
     Load multimodal inference requests from conv.jsonl files in a directory tree.
 
@@ -280,11 +277,14 @@ class MultimodalDirectoryJSONLDataLoader(MultimodalDataLoader):
                             continue
 
                         try:
-                            obj = json.loads(line)
-                            obj['_source_file'] = str(rel_path)
-                            obj['_source_dir'] = str(rel_dir) if rel_dir != Path('.') else ''
-                            obj['_source_dir_path'] = str(source_dir)
-                            self.data.append(obj)
+                            # Use the mixin's parse_line method for extensibility
+                            obj = self.parse_line(line, line_num, str(rel_path))
+                            if obj is not None:
+                                # Add source information
+                                obj['_source_file'] = str(rel_path)
+                                obj['_source_dir'] = str(rel_dir) if rel_dir != Path('.') else ''
+                                obj['_source_dir_path'] = str(source_dir)
+                                self.data.append(obj)
                         except json.JSONDecodeError as e:
                             logger.warning(f"Invalid JSON in {rel_path}:{line_num}: {e}")
                             continue
@@ -322,9 +322,12 @@ class MultimodalDirectoryJSONLDataLoader(MultimodalDataLoader):
         # Otherwise use image_base_dir (handled by parent class's _encode_image_to_base64)
         return image_path
 
-    def _extract_images(self, item: Dict[str, Any]) -> Optional[List[str]]:
+    def extract_images(self, item: Dict[str, Any]) -> Optional[List[str]]:
         """
-        Extract image paths from a JSONL item and resolve them.
+        Extract and resolve image paths from a JSONL item.
+
+        This method can be overridden to customize image extraction.
+        Default implementation checks image_field and images_field.
 
         Args:
             item: Dictionary representing one JSONL line
@@ -378,24 +381,16 @@ class MultimodalDirectoryJSONLDataLoader(MultimodalDataLoader):
         # In non-streaming mode, iterate over pre-loaded data
         if not self.streaming:
             for item in self.data:
-                prompt = item.get(self.prompt_field)
-                request_id = item.get(self.id_field, f"req_{id(item)}")
-
+                prompt = self.extract_prompt(item)
                 if prompt is None:
-                    logger.debug(f"Skipping item {request_id}: no '{self.prompt_field}' field")
+                    logger.debug(f"Skipping item: no '{self.prompt_field}' field")
                     continue
 
-                images = self._extract_images(item)
+                request_id = self.extract_request_id(item, f"req_{id(item)}")
+                images = self.extract_images(item)
 
-                excluded_fields = {
-                    self.prompt_field, self.id_field,
-                    self.image_field, self.images_field,
-                    '_source_file', '_source_dir', '_source_dir_path'
-                }
-                additional_data = {
-                    k: v for k, v in item.items()
-                    if k not in excluded_fields
-                }
+                # Extract additional data with proper field exclusion
+                additional_data = self._extract_additional_data_multimodal(item)
 
                 yield self._create_multimodal_result(
                     text=prompt,
@@ -419,32 +414,27 @@ class MultimodalDirectoryJSONLDataLoader(MultimodalDataLoader):
                             continue
 
                         try:
-                            obj = json.loads(line)
+                            # Use the mixin's parse_line method for extensibility
+                            obj = self.parse_line(line, line_num, str(rel_path))
+                            if obj is None:
+                                # Line was skipped by the mixin
+                                continue
+
                             # Add source information
                             obj['_source_file'] = str(rel_path)
                             obj['_source_dir'] = str(rel_dir) if rel_dir != Path('.') else ''
                             obj['_source_dir_path'] = str(source_dir)
 
-                            prompt = obj.get(self.prompt_field)
-                            request_id = obj.get(self.id_field, f"{rel_path}:{line_num}")
-
+                            prompt = self.extract_prompt(obj)
                             if prompt is None:
-                                logger.debug(f"Skipping item {request_id}: no '{self.prompt_field}' field")
+                                logger.debug(f"Skipping item {rel_path}:{line_num}: no '{self.prompt_field}' field")
                                 continue
 
-                            # Extract and resolve images
-                            images = self._extract_images(obj)
+                            request_id = self.extract_request_id(obj, f"{rel_path}:{line_num}")
+                            images = self.extract_images(obj)
 
-                            # Extract additional data
-                            excluded_fields = {
-                                self.prompt_field, self.id_field,
-                                self.image_field, self.images_field,
-                                '_source_file', '_source_dir', '_source_dir_path'
-                            }
-                            additional_data = {
-                                k: v for k, v in obj.items()
-                                if k not in excluded_fields
-                            }
+                            # Extract additional data with proper field exclusion
+                            additional_data = self._extract_additional_data_multimodal(obj)
 
                             yield self._create_multimodal_result(
                                 text=prompt,
@@ -458,6 +448,28 @@ class MultimodalDirectoryJSONLDataLoader(MultimodalDataLoader):
             except IOError as e:
                 logger.error(f"Error reading file {rel_path}: {e}")
                 continue
+
+    def _extract_additional_data_multimodal(self, item: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Extract additional data from parsed item (multimodal version).
+
+        Excludes prompt, id, image fields, and source metadata.
+
+        Args:
+            item: Parsed dictionary from parse_line()
+
+        Returns:
+            Dictionary of additional data
+        """
+        excluded_fields = {
+            self.prompt_field, self.id_field,
+            self.image_field, self.images_field,
+            '_source_file', '_source_dir', '_source_dir_path'
+        }
+        return {
+            k: v for k, v in item.items()
+            if k not in excluded_fields and v is not None
+        }
 
     def __len__(self):
         if not self.streaming:

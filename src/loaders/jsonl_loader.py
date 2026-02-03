@@ -12,13 +12,14 @@ from pathlib import Path
 import logging
 
 from .base import DataLoader, LoadResult
+from .jsonl_mixin import JSONLLoaderMixin
 from .multimodal_base import MultimodalDataLoader, MultimodalLoadResult
 
 
 logger = logging.getLogger(__name__)
 
 
-class JSONLDataLoader(DataLoader):
+class JSONLDataLoader(JSONLLoaderMixin, DataLoader):
     """
     Load inference requests from a JSONL file (text-only mode).
 
@@ -37,6 +38,23 @@ class JSONLDataLoader(DataLoader):
 
     For multimodal mode, set multimodal: True in config.
     See MultimodalJSONLDataLoader for details.
+
+    Customization:
+        Override methods from JSONLLoaderMixin to customize parsing:
+        - parse_line(): Parse custom JSONL formats (e.g., list-based lines)
+        - should_skip_item(): Filter items
+        - extract_request_id(): Custom ID extraction
+        - extract_prompt(): Custom prompt extraction
+        - extract_additional_data(): Custom additional data extraction
+
+    Example:
+        class MyLoader(JSONLDataLoader):
+            def parse_line(self, line, line_num, source):
+                # Handle list-format: [{"text": "hello"}]
+                obj = json.loads(line)
+                if isinstance(obj, list):
+                    return {"items": obj, "id": str(line_num)}
+                return obj
     """
 
     def _initialize(self):
@@ -57,8 +75,10 @@ class JSONLDataLoader(DataLoader):
                     continue
 
                 try:
-                    obj = json.loads(line)
-                    self.data.append(obj)
+                    # Use the mixin's parse_line method for extensibility
+                    obj = self.parse_line(line, line_num, str(self.file_path))
+                    if obj is not None:
+                        self.data.append(obj)
                 except json.JSONDecodeError as e:
                     raise ValueError(f"Invalid JSON on line {line_num}: {e}")
 
@@ -67,18 +87,16 @@ class JSONLDataLoader(DataLoader):
 
     def load(self) -> Iterator[LoadResult]:
         """Yield LoadResult objects from JSONL data."""
-        for item in self.data:
-            prompt = item.get(self.prompt_field)
-            request_id = item.get(self.id_field, f"req_{id(item)}")
+        for idx, item in enumerate(self.data, 1):
+            # Use the mixin's template method for processing
+            default_id = f"req_{idx}"
+            prompt = self.extract_prompt(item)
 
             if prompt is None:
                 continue
 
-            # Extract additional data (everything except prompt and id)
-            additional_data = {
-                k: v for k, v in item.items()
-                if k not in [self.prompt_field, self.id_field]
-            }
+            request_id = self.extract_request_id(item, default_id)
+            additional_data = self.extract_additional_data(item)
 
             yield LoadResult(
                 messages=[{"role": "user", "content": prompt}],
@@ -90,7 +108,7 @@ class JSONLDataLoader(DataLoader):
         return len(self.data)
 
 
-class MultimodalJSONLDataLoader(MultimodalDataLoader):
+class MultimodalJSONLDataLoader(JSONLLoaderMixin, MultimodalDataLoader):
     """
     Load multimodal inference requests from a JSONL file.
 
@@ -123,12 +141,26 @@ class MultimodalJSONLDataLoader(MultimodalDataLoader):
     - If 'image' field exists: use it (single image)
     - Else if 'images' field exists: use it (multiple images)
     - Else: text-only mode
+
+    Customization:
+        Override methods from JSONLLoaderMixin to customize parsing:
+        - parse_line(): Parse custom JSONL formats
+        - extract_images(): Custom image extraction
+        - extract_additional_data(): Custom additional data extraction
+
+    Example:
+        class MyMultimodalLoader(MultimodalJSONLDataLoader):
+            def extract_images(self, item):
+                # Support nested image structure
+                if 'media' in item:
+                    return [m['path'] for m in item['media'] if m['type'] == 'image']
+                return super().extract_images(item)
     """
 
     def _initialize(self):
         """Initialize multimodal JSONL file loader."""
         # Initialize multimodal base
-        super()._initialize()
+        MultimodalDataLoader._initialize(self)
 
         # JSONL-specific config
         self.file_path = Path(self.config['file_path'])
@@ -149,17 +181,22 @@ class MultimodalJSONLDataLoader(MultimodalDataLoader):
                     continue
 
                 try:
-                    obj = json.loads(line)
-                    self.data.append(obj)
+                    # Use the mixin's parse_line method for extensibility
+                    obj = self.parse_line(line, line_num, str(self.file_path))
+                    if obj is not None:
+                        self.data.append(obj)
                 except json.JSONDecodeError as e:
                     raise ValueError(f"Invalid JSON on line {line_num}: {e}")
 
         if not self.data:
             raise ValueError(f"No valid JSON objects found in {self.file_path}")
 
-    def _extract_images(self, item: Dict[str, Any]) -> Optional[List[str]]:
+    def extract_images(self, item: Dict[str, Any]) -> Optional[List[str]]:
         """
         Extract image paths from a JSONL item.
+
+        This method can be overridden to customize image extraction.
+        Default implementation checks image_field and images_field.
 
         Args:
             item: Dictionary representing one JSONL line
@@ -192,25 +229,44 @@ class MultimodalJSONLDataLoader(MultimodalDataLoader):
 
         return None
 
+    def extract_additional_data(self, item: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Extract additional data from parsed item (multimodal version).
+
+        Excludes prompt, id, and image fields.
+
+        Args:
+            item: Parsed dictionary from parse_line()
+
+        Returns:
+            Dictionary of additional data
+        """
+        excluded_fields = {
+            self.prompt_field, self.id_field,
+            self.image_field, self.images_field
+        }
+        return {
+            k: v for k, v in item.items()
+            if k not in excluded_fields and v is not None
+        }
+
     def load(self) -> Iterator[MultimodalLoadResult]:
         """Yield MultimodalLoadResult objects from JSONL data."""
-        for item in self.data:
-            prompt = item.get(self.prompt_field)
-            request_id = item.get(self.id_field, f"req_{id(item)}")
-
+        for idx, item in enumerate(self.data, 1):
+            # Use the mixin's extract_prompt method
+            prompt = self.extract_prompt(item)
             if prompt is None:
-                logger.debug(f"Skipping item {request_id}: no '{self.prompt_field}' field")
+                logger.debug(f"Skipping item {idx}: no '{self.prompt_field}' field")
                 continue
 
-            # Extract images
-            images = self._extract_images(item)
+            # Use the mixin's extract_request_id method
+            request_id = self.extract_request_id(item, f"req_{idx}")
 
-            # Extract additional data (exclude prompt, id, and image fields)
-            excluded_fields = {self.prompt_field, self.id_field, self.image_field, self.images_field}
-            additional_data = {
-                k: v for k, v in item.items()
-                if k not in excluded_fields
-            }
+            # Extract images using custom method
+            images = self.extract_images(item)
+
+            # Extract additional data using custom method
+            additional_data = self.extract_additional_data(item)
 
             # Create multimodal result
             yield self._create_multimodal_result(
