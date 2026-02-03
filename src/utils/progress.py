@@ -5,8 +5,11 @@ Provides progress tracking and reporting for batch operations.
 """
 import time
 import threading
+import logging
 from typing import Optional
 from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -50,7 +53,7 @@ class ProgressTracker:
             rate = self.completed_items / elapsed if elapsed > 0 else 0
             eta = (self.total_items - self.completed_items) / rate if rate > 0 else 0
 
-            print(
+            logger.info(
                 f"[Progress] {self.completed_items}/{self.total_items} "
                 f"({percentage:.1f}%) | "
                 f"Rate: {rate:.2f} items/sec | "
@@ -60,7 +63,7 @@ class ProgressTracker:
             elapsed = time.time() - self.start_time
             rate = self.completed_items / elapsed if elapsed > 0 else 0
 
-            print(
+            logger.info(
                 f"[Progress] {self.completed_items} completed | "
                 f"Rate: {rate:.2f} items/sec"
             )
@@ -93,14 +96,14 @@ class ProgressTracker:
 
             if self.total_items > 0:
                 percentage = (self.completed_items / self.total_items) * 100
-                print(
+                logger.info(
                     f"[Progress] Complete: {self.completed_items}/{self.total_items} "
                     f"({percentage:.1f}%) | "
                     f"Total time: {elapsed:.2f}s | "
                     f"Avg rate: {rate:.2f} items/sec"
                 )
             else:
-                print(
+                logger.info(
                     f"[Progress] Complete: {self.completed_items} items | "
                     f"Total time: {elapsed:.2f}s | "
                     f"Avg rate: {rate:.2f} items/sec"
