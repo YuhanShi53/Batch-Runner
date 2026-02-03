@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 class CheckpointData:
     """Data stored in checkpoint."""
     completed_request_ids: Set[str]
+    failed_request_ids: Set[str]  # Track failed requests for retry
     total_requests: int
     completed_count: int
     failed_count: int
@@ -28,6 +29,7 @@ class CheckpointData:
         """Convert to dictionary for JSON serialization."""
         return {
             'completed_request_ids': list(self.completed_request_ids),
+            'failed_request_ids': list(self.failed_request_ids),
             'total_requests': self.total_requests,
             'completed_count': self.completed_count,
             'failed_count': self.failed_count,
@@ -41,6 +43,7 @@ class CheckpointData:
         """Create from dictionary."""
         return cls(
             completed_request_ids=set(data.get('completed_request_ids', [])),
+            failed_request_ids=set(data.get('failed_request_ids', [])),
             total_requests=data.get('total_requests', 0),
             completed_count=data.get('completed_count', 0),
             failed_count=data.get('failed_count', 0),
@@ -111,6 +114,7 @@ class CheckpointManager:
             # Create new checkpoint
             self.data = CheckpointData(
                 completed_request_ids=set(),
+                failed_request_ids=set(),
                 total_requests=total_requests,
                 completed_count=0,
                 failed_count=0,
@@ -123,18 +127,33 @@ class CheckpointManager:
 
     def is_completed(self, request_id: str) -> bool:
         """
-        Check if a request has been completed.
+        Check if a request has been completed successfully.
 
         Args:
             request_id: Request identifier
 
         Returns:
-            True if request was already completed
+            True if request was already completed successfully
         """
         with self._lock:
             if self.data is None:
                 return False
             return request_id in self.data.completed_request_ids
+
+    def is_failed(self, request_id: str) -> bool:
+        """
+        Check if a request has failed.
+
+        Args:
+            request_id: Request identifier
+
+        Returns:
+            True if request has failed
+        """
+        with self._lock:
+            if self.data is None:
+                return False
+            return request_id in self.data.failed_request_ids
 
     def mark_completed(
         self,
@@ -163,12 +182,24 @@ class CheckpointManager:
             self._pending_count += 1
             self.data.last_update_time = self._pending_count
 
-    def mark_failed(self):
-        """Increment failed count."""
+    def mark_failed(self, request_id: str):
+        """
+        Mark a request as failed.
+
+        Args:
+            request_id: Request identifier
+        """
         with self._lock:
             if self.data is None:
                 return
-            self.data.failed_count += 1
+
+            # Only add to failed set if not already completed
+            if request_id not in self.data.completed_request_ids:
+                self.data.failed_request_ids.add(request_id)
+                self.data.failed_count += 1
+
+            self._pending_count += 1
+            self.data.last_update_time = self._pending_count
 
     def maybe_save(self) -> bool:
         """
@@ -217,3 +248,29 @@ class CheckpointManager:
                 'retried': self.data.retried_count,
                 'tokens': self.data.total_tokens,
             }
+
+    def get_failed_request_ids(self) -> Set[str]:
+        """
+        Get set of failed request IDs.
+
+        Returns:
+            Set of failed request IDs
+        """
+        with self._lock:
+            if self.data is None:
+                return set()
+            return set(self.data.failed_request_ids)
+
+    def clear_failed(self, request_id: str):
+        """
+        Clear a failed request ID (when retrying a failed request).
+
+        Args:
+            request_id: Request identifier to remove from failed set
+        """
+        with self._lock:
+            if self.data is None:
+                return
+            if request_id in self.data.failed_request_ids:
+                self.data.failed_request_ids.discard(request_id)
+                self._pending_count += 1
