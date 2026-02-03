@@ -14,13 +14,14 @@ import logging
 
 from .base import DataLoader, LoadResult
 from .jsonl_mixin import JSONLLoaderMixin
+from .streaming_mixin import StreamingLoaderMixin, MessagesBuilderMixin
 from .multimodal_base import MultimodalDataLoader, MultimodalLoadResult
 
 
 logger = logging.getLogger(__name__)
 
 
-class JSONLDataLoader(JSONLLoaderMixin, DataLoader):
+class JSONLDataLoader(StreamingLoaderMixin, MessagesBuilderMixin, JSONLLoaderMixin, DataLoader):
     """
     Load inference requests from a JSONL file (text-only mode).
 
@@ -59,14 +60,14 @@ class JSONLDataLoader(JSONLLoaderMixin, DataLoader):
         self.file_path = Path(self.config['file_path'])
         self.prompt_field = self.config.get('prompt_field', 'prompt')
         self.id_field = self.config.get('id_field', 'id')
-        self.streaming = self.config.get('streaming', True)
+
+        # Initialize streaming configuration from StreamingLoaderMixin
+        self._initialize_streaming()
 
         if not self.file_path.exists():
             raise FileNotFoundError(f"JSONL file not found: {self.file_path}")
 
-        if self.streaming:
-            logger.info(f"Streaming mode enabled for {self.file_path}")
-        else:
+        if not self.streaming:
             # Batch mode: Load all lines into memory
             logger.info(f"Batch mode: loading all data from {self.file_path} into memory")
             self.data = []
@@ -89,25 +90,49 @@ class JSONLDataLoader(JSONLLoaderMixin, DataLoader):
 
             logger.info(f"Loaded {len(self.data)} items into memory")
 
+    def _discover_sources(self) -> List[Any]:
+        """Return the single JSONL file as the data source."""
+        return [self.file_path]
+
+    def _process_source(self, source: Path) -> Iterator[LoadResult]:
+        """
+        Process the JSONL file line by line.
+
+        Args:
+            source: Path to the JSONL file
+
+        Yields:
+            LoadResult objects from each line
+        """
+        with open(source, 'r', encoding='utf-8') as f:
+            for line_num, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:
+                    continue
+
+                result = self.process_line_to_load_result(
+                    line=line,
+                    line_num=line_num,
+                    source=str(source),
+                    default_id=f"req_{line_num}"
+                )
+
+                if result is not None:
+                    yield result
+
+    def _on_source_start(self, source: Path):
+        """Log when starting to process the file."""
+        logger.info(f"Processing JSONL file: {source}")
+
+    def _on_source_complete(self, source: Path, item_count: int):
+        """Log when file processing is complete."""
+        logger.info(f"Completed {source}: {item_count} items loaded")
+
     def load(self) -> Iterator[LoadResult]:
         """Yield LoadResult objects from JSONL data."""
         if self.streaming:
-            # Streaming mode: read file line by line
-            with open(self.file_path, 'r', encoding='utf-8') as f:
-                for line_num, line in enumerate(f, 1):
-                    line = line.strip()
-                    if not line:
-                        continue
-
-                    result = self.process_line_to_load_result(
-                        line=line,
-                        line_num=line_num,
-                        source=str(self.file_path),
-                        default_id=f"req_{line_num}"
-                    )
-
-                    if result is not None:
-                        yield result
+            # Use StreamingLoaderMixin template method
+            yield from self._stream_load()
         else:
             # Batch mode: iterate over pre-loaded data
             for idx, item in enumerate(self.data, 1):
@@ -122,10 +147,7 @@ class JSONLDataLoader(JSONLLoaderMixin, DataLoader):
                 additional_data = self.extract_additional_data(item)
 
                 # Build messages (supports MessagesBuilderMixin)
-                if hasattr(self, 'build_messages'):
-                    messages = self.build_messages(prompt, additional_data)
-                else:
-                    messages = [{"role": "user", "content": prompt}]
+                messages = self.build_messages(prompt, additional_data)
 
                 yield LoadResult(
                     messages=messages,
@@ -139,7 +161,7 @@ class JSONLDataLoader(JSONLLoaderMixin, DataLoader):
         return len(self.data)
 
 
-class MultimodalJSONLDataLoader(JSONLLoaderMixin, MultimodalDataLoader):
+class MultimodalJSONLDataLoader(StreamingLoaderMixin, JSONLLoaderMixin, MultimodalDataLoader):
     """
     Load multimodal inference requests from a JSONL file.
 
@@ -167,6 +189,7 @@ class MultimodalJSONLDataLoader(JSONLLoaderMixin, MultimodalDataLoader):
         images_field: Field name for multiple images (default: "images")
         image_base_dir: Base directory for relative image paths (default: "")
         encode_images: Whether to encode images to base64 (default: True)
+        streaming: Enable streaming mode (default: False for backwards compatibility)
 
     Image field precedence:
     - If 'image' field exists: use it (single image)
@@ -200,27 +223,96 @@ class MultimodalJSONLDataLoader(JSONLLoaderMixin, MultimodalDataLoader):
         self.image_field = self.config.get('image_field', 'image')
         self.images_field = self.config.get('images_field', 'images')
 
+        # Initialize streaming configuration from StreamingLoaderMixin
+        # Default to False for backwards compatibility with existing behavior
+        self._initialize_streaming()
+
         if not self.file_path.exists():
             raise FileNotFoundError(f"JSONL file not found: {self.file_path}")
 
-        # Load all lines into memory
-        self.data = []
-        with open(self.file_path, 'r', encoding='utf-8') as f:
+        if not self.streaming:
+            # Batch mode: Load all lines into memory
+            logger.info(f"Batch mode: loading all data from {self.file_path} into memory")
+            self.data = []
+            with open(self.file_path, 'r', encoding='utf-8') as f:
+                for line_num, line in enumerate(f, 1):
+                    line = line.strip()
+                    if not line:
+                        continue
+
+                    try:
+                        # Use the mixin's parse_line method for extensibility
+                        obj = self.parse_line(line, line_num, str(self.file_path))
+                        if obj is not None:
+                            self.data.append(obj)
+                    except json.JSONDecodeError as e:
+                        raise ValueError(f"Invalid JSON on line {line_num}: {e}")
+
+            if not self.data:
+                raise ValueError(f"No valid JSON objects found in {self.file_path}")
+
+            logger.info(f"Loaded {len(self.data)} items into memory")
+
+    def _discover_sources(self) -> List[Any]:
+        """Return the single JSONL file as the data source."""
+        return [self.file_path]
+
+    def _process_source(self, source: Path) -> Iterator[MultimodalLoadResult]:
+        """
+        Process the JSONL file line by line for multimodal data.
+
+        Args:
+            source: Path to the JSONL file
+
+        Yields:
+            MultimodalLoadResult objects from each line
+        """
+        with open(source, 'r', encoding='utf-8') as f:
             for line_num, line in enumerate(f, 1):
                 line = line.strip()
                 if not line:
                     continue
 
-                try:
-                    # Use the mixin's parse_line method for extensibility
-                    obj = self.parse_line(line, line_num, str(self.file_path))
-                    if obj is not None:
-                        self.data.append(obj)
-                except json.JSONDecodeError as e:
-                    raise ValueError(f"Invalid JSON on line {line_num}: {e}")
+                # Parse the line
+                item = self.parse_line(line, line_num, str(source))
+                if item is None:
+                    continue
 
-        if not self.data:
-            raise ValueError(f"No valid JSON objects found in {self.file_path}")
+                # Check if we should skip this item
+                if self.should_skip_item(item):
+                    logger.debug(f"Skipping item in {source}:{line_num}")
+                    continue
+
+                # Extract prompt
+                prompt = self.extract_prompt(item)
+                if prompt is None:
+                    logger.debug(f"Skipping item in {source}:{line_num}: no prompt found")
+                    continue
+
+                # Extract request_id
+                request_id = self.extract_request_id(item, f"req_{line_num}")
+
+                # Extract images using custom method
+                images = self.extract_images(item)
+
+                # Extract additional data using custom method
+                additional_data = self.extract_additional_data(item)
+
+                # Create multimodal result
+                yield self._create_multimodal_result(
+                    text=prompt,
+                    images=images,
+                    request_id=str(request_id),
+                    additional_data=additional_data or None
+                )
+
+    def _on_source_start(self, source: Path):
+        """Log when starting to process the file."""
+        logger.info(f"Processing multimodal JSONL file: {source}")
+
+    def _on_source_complete(self, source: Path, item_count: int):
+        """Log when file processing is complete."""
+        logger.info(f"Completed {source}: {item_count} items loaded")
 
     def extract_images(self, item: Dict[str, Any]) -> Optional[List[str]]:
         """
@@ -283,29 +375,36 @@ class MultimodalJSONLDataLoader(JSONLLoaderMixin, MultimodalDataLoader):
 
     def load(self) -> Iterator[MultimodalLoadResult]:
         """Yield MultimodalLoadResult objects from JSONL data."""
-        for idx, item in enumerate(self.data, 1):
-            # Use the mixin's extract_prompt method
-            prompt = self.extract_prompt(item)
-            if prompt is None:
-                logger.debug(f"Skipping item {idx}: no '{self.prompt_field}' field")
-                continue
+        if self.streaming:
+            # Use StreamingLoaderMixin template method
+            yield from self._stream_load()
+        else:
+            # Batch mode: iterate over pre-loaded data
+            for idx, item in enumerate(self.data, 1):
+                # Use the mixin's extract_prompt method
+                prompt = self.extract_prompt(item)
+                if prompt is None:
+                    logger.debug(f"Skipping item {idx}: no '{self.prompt_field}' field")
+                    continue
 
-            # Use the mixin's extract_request_id method
-            request_id = self.extract_request_id(item, f"req_{idx}")
+                # Use the mixin's extract_request_id method
+                request_id = self.extract_request_id(item, f"req_{idx}")
 
-            # Extract images using custom method
-            images = self.extract_images(item)
+                # Extract images using custom method
+                images = self.extract_images(item)
 
-            # Extract additional data using custom method
-            additional_data = self.extract_additional_data(item)
+                # Extract additional data using custom method
+                additional_data = self.extract_additional_data(item)
 
-            # Create multimodal result
-            yield self._create_multimodal_result(
-                text=prompt,
-                images=images,
-                request_id=str(request_id),
-                additional_data=additional_data or None
-            )
+                # Create multimodal result
+                yield self._create_multimodal_result(
+                    text=prompt,
+                    images=images,
+                    request_id=str(request_id),
+                    additional_data=additional_data or None
+                )
 
     def __len__(self):
+        if self.streaming:
+            raise NotImplementedError("Cannot get length in streaming mode")
         return len(self.data)

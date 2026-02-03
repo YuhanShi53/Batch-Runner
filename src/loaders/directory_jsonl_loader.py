@@ -7,19 +7,20 @@ Preserves directory structure information for each loaded item.
 Supports both text-only and multimodal (text + images) data.
 """
 import json
-from typing import Iterator, Dict, Any, Optional, List
+from typing import Iterator, Dict, Any, Optional, List, Tuple
 from pathlib import Path
 import logging
 
 from .base import DataLoader, LoadResult
 from .jsonl_mixin import JSONLLoaderMixin
+from .streaming_mixin import StreamingLoaderMixin, MessagesBuilderMixin
 from .multimodal_base import MultimodalDataLoader, MultimodalLoadResult
 
 
 logger = logging.getLogger(__name__)
 
 
-class DirectoryJSONLDataLoader(JSONLLoaderMixin, DataLoader):
+class DirectoryJSONLDataLoader(StreamingLoaderMixin, MessagesBuilderMixin, JSONLLoaderMixin, DataLoader):
     """
     Load inference requests from conv.jsonl files in a directory tree (text-only mode).
 
@@ -37,10 +38,7 @@ class DirectoryJSONLDataLoader(JSONLLoaderMixin, DataLoader):
         prompt_field: Field name containing the prompt (default: "prompt")
         id_field: Field name containing the ID (default: "id")
         recursive: Whether to search subdirectories (default: true)
-        multimodal: Set to True to enable multimodal support (default: False)
-
-    For multimodal mode, set multimodal: True in config.
-    See MultimodalDirectoryJSONLDataLoader for details.
+        streaming: Enable streaming mode (default: True for efficiency)
 
     Additional data included for each item:
         _source_file: Relative path from input_dir to the source conv.jsonl file
@@ -54,8 +52,9 @@ class DirectoryJSONLDataLoader(JSONLLoaderMixin, DataLoader):
         self.prompt_field = self.config.get('prompt_field', 'prompt')
         self.id_field = self.config.get('id_field', 'id')
         self.recursive = self.config.get('recursive', True)
-        self.multimodal = self.config.get('multimodal', False)
-        self.streaming = self.config.get('streaming', True)  # Enable streaming by default
+
+        # Initialize streaming configuration from StreamingLoaderMixin
+        self._initialize_streaming()
 
         if not self.input_dir.exists():
             raise FileNotFoundError(f"Input directory not found: {self.input_dir}")
@@ -106,13 +105,86 @@ class DirectoryJSONLDataLoader(JSONLLoaderMixin, DataLoader):
                 raise ValueError(f"No valid JSON objects found in {self.input_dir}")
 
             logger.info(f"Loaded {len(self.data)} items from {len(self.files)} files into memory")
-        else:
-            logger.info(f"Streaming mode enabled: will process files on-demand")
+
+    def _discover_sources(self) -> List[Tuple[Path, Path, Path]]:
+        """
+        Discover all JSONL files along with their metadata.
+
+        Returns:
+            List of tuples (file_path, rel_path, rel_dir) for each file
+        """
+        sources = []
+        for file_path in self.files:
+            rel_path = file_path.relative_to(self.input_dir)
+            rel_dir = rel_path.parent
+            sources.append((file_path, rel_path, rel_dir))
+        return sources
+
+    def _process_source(self, source: Tuple[Path, Path, Path]) -> Iterator[LoadResult]:
+        """
+        Process a single JSONL file.
+
+        Args:
+            source: Tuple of (file_path, rel_path, rel_dir)
+
+        Yields:
+            LoadResult objects from the file
+        """
+        file_path, rel_path, rel_dir = source
+
+        with open(file_path, 'r', encoding='utf-8') as f:
+            for line_num, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:
+                    continue
+
+                try:
+                    # Use the mixin's process_line_to_load_result template method
+                    result = self.process_line_to_load_result(
+                        line=line,
+                        line_num=line_num,
+                        source=str(rel_path),
+                        default_id=f"{rel_path}:{line_num}"
+                    )
+
+                    if result is None:
+                        # Line was skipped by the mixin
+                        continue
+
+                    # Add source information to additional_data
+                    if result.additional_data is None:
+                        result.additional_data = {}
+                    result.additional_data['_source_file'] = str(rel_path)
+                    result.additional_data['_source_dir'] = str(rel_dir) if rel_dir != Path('.') else ''
+
+                    yield result
+
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Invalid JSON in {rel_path}:{line_num}: {e}")
+                    continue
+
+    def _on_source_start(self, source: Tuple[Path, Path, Path]):
+        """Log when starting to process a file."""
+        file_path, rel_path, _ = source
+        logger.debug(f"Processing file: {rel_path}")
+
+    def _on_source_complete(self, source: Tuple[Path, Path, Path], item_count: int):
+        """Log when file processing is complete."""
+        file_path, rel_path, _ = source
+        logger.debug(f"Completed {rel_path}: {item_count} items")
+
+    def _on_source_error(self, source: Tuple[Path, Path, Path], error: Exception):
+        """Handle file processing errors."""
+        file_path, rel_path, _ = source
+        logger.error(f"Error reading file {rel_path}: {error}")
 
     def load(self) -> Iterator[LoadResult]:
         """Yield LoadResult objects from directory JSONL data."""
-        # In non-streaming mode, iterate over pre-loaded data
-        if not self.streaming:
+        if self.streaming:
+            # Use StreamingLoaderMixin template method
+            yield from self._stream_load()
+        else:
+            # Batch mode: iterate over pre-loaded data
             for item in self.data:
                 prompt = self.extract_prompt(item)
                 if prompt is None:
@@ -122,52 +194,14 @@ class DirectoryJSONLDataLoader(JSONLLoaderMixin, DataLoader):
                 request_id = self.extract_request_id(item, f"req_{id(item)}")
                 additional_data = self.extract_additional_data(item)
 
+                # Build messages using MessagesBuilderMixin
+                messages = self.build_messages(prompt, additional_data)
+
                 yield LoadResult(
-                    messages=[{"role": "user", "content": prompt}],
+                    messages=messages,
                     request_id=str(request_id),
                     additional_data=additional_data or None
                 )
-            return
-
-        # Streaming mode: read files on-demand
-        for file_path in self.files:
-            rel_path = file_path.relative_to(self.input_dir)
-            rel_dir = rel_path.parent
-
-            try:
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    for line_num, line in enumerate(f, 1):
-                        line = line.strip()
-                        if not line:
-                            continue
-
-                        try:
-                            # Use the mixin's process_line_to_load_result template method
-                            result = self.process_line_to_load_result(
-                                line=line,
-                                line_num=line_num,
-                                source=str(rel_path),
-                                default_id=f"{rel_path}:{line_num}"
-                            )
-
-                            if result is None:
-                                # Line was skipped by the mixin
-                                continue
-
-                            # Add source information to additional_data
-                            if result.additional_data is None:
-                                result.additional_data = {}
-                            result.additional_data['_source_file'] = str(rel_path)
-                            result.additional_data['_source_dir'] = str(rel_dir) if rel_dir != Path('.') else ''
-
-                            yield result
-
-                        except json.JSONDecodeError as e:
-                            logger.warning(f"Invalid JSON in {rel_path}:{line_num}: {e}")
-                            continue
-            except IOError as e:
-                logger.error(f"Error reading file {rel_path}: {e}")
-                continue
 
     def __len__(self):
         if not self.streaming:
@@ -176,7 +210,7 @@ class DirectoryJSONLDataLoader(JSONLLoaderMixin, DataLoader):
         raise NotImplementedError("Cannot get length in streaming mode")
 
 
-class MultimodalDirectoryJSONLDataLoader(JSONLLoaderMixin, MultimodalDataLoader):
+class MultimodalDirectoryJSONLDataLoader(StreamingLoaderMixin, JSONLLoaderMixin, MultimodalDataLoader):
     """
     Load multimodal inference requests from conv.jsonl files in a directory tree.
 
@@ -227,7 +261,7 @@ class MultimodalDirectoryJSONLDataLoader(JSONLLoaderMixin, MultimodalDataLoader)
     def _initialize(self):
         """Initialize multimodal directory JSONL loader."""
         # Initialize multimodal base
-        super()._initialize()
+        MultimodalDataLoader._initialize(self)
 
         # Directory-specific config
         self.input_dir = Path(self.config['input_dir'])
@@ -237,7 +271,9 @@ class MultimodalDirectoryJSONLDataLoader(JSONLLoaderMixin, MultimodalDataLoader)
         self.image_field = self.config.get('image_field', 'image')
         self.images_field = self.config.get('images_field', 'images')
         self.recursive = self.config.get('recursive', True)
-        self.streaming = self.config.get('streaming', True)  # Enable streaming by default
+
+        # Initialize streaming configuration from StreamingLoaderMixin
+        self._initialize_streaming()
 
         # If image_base_dir is not specified, we'll use the directory of each conv.jsonl file
         self.use_source_dir_as_base = not self.config.get('image_base_dir', '')
@@ -293,8 +329,87 @@ class MultimodalDirectoryJSONLDataLoader(JSONLLoaderMixin, MultimodalDataLoader)
                 raise ValueError(f"No valid JSON objects found in {self.input_dir}")
 
             logger.info(f"Loaded {len(self.data)} items from {len(self.files)} files into memory")
-        else:
-            logger.info(f"Streaming mode enabled: will process files on-demand")
+
+    def _discover_sources(self) -> List[Tuple[Path, Path, Path, Path]]:
+        """
+        Discover all JSONL files along with their metadata.
+
+        Returns:
+            List of tuples (file_path, rel_path, rel_dir, source_dir) for each file
+        """
+        sources = []
+        for file_path in self.files:
+            rel_path = file_path.relative_to(self.input_dir)
+            rel_dir = rel_path.parent
+            source_dir = file_path.parent
+            sources.append((file_path, rel_path, rel_dir, source_dir))
+        return sources
+
+    def _process_source(self, source: Tuple[Path, Path, Path, Path]) -> Iterator[MultimodalLoadResult]:
+        """
+        Process a single JSONL file for multimodal data.
+
+        Args:
+            source: Tuple of (file_path, rel_path, rel_dir, source_dir)
+
+        Yields:
+            MultimodalLoadResult objects from the file
+        """
+        file_path, rel_path, rel_dir, source_dir = source
+
+        with open(file_path, 'r', encoding='utf-8') as f:
+            for line_num, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:
+                    continue
+
+                try:
+                    # Use the mixin's parse_line method for extensibility
+                    obj = self.parse_line(line, line_num, str(rel_path))
+                    if obj is None:
+                        # Line was skipped by the mixin
+                        continue
+
+                    # Add source information
+                    obj['_source_file'] = str(rel_path)
+                    obj['_source_dir'] = str(rel_dir) if rel_dir != Path('.') else ''
+                    obj['_source_dir_path'] = str(source_dir)
+
+                    prompt = self.extract_prompt(obj)
+                    if prompt is None:
+                        logger.debug(f"Skipping item {rel_path}:{line_num}: no '{self.prompt_field}' field")
+                        continue
+
+                    request_id = self.extract_request_id(obj, f"{rel_path}:{line_num}")
+                    images = self.extract_images(obj)
+
+                    # Extract additional data with proper field exclusion
+                    additional_data = self._extract_additional_data_multimodal(obj)
+
+                    yield self._create_multimodal_result(
+                        text=prompt,
+                        images=images,
+                        request_id=str(request_id),
+                        additional_data=additional_data or None
+                    )
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Invalid JSON in {rel_path}:{line_num}: {e}")
+                    continue
+
+    def _on_source_start(self, source: Tuple[Path, Path, Path, Path]):
+        """Log when starting to process a file."""
+        file_path, rel_path, _, _ = source
+        logger.debug(f"Processing file: {rel_path}")
+
+    def _on_source_complete(self, source: Tuple[Path, Path, Path, Path], item_count: int):
+        """Log when file processing is complete."""
+        file_path, rel_path, _, _ = source
+        logger.debug(f"Completed {rel_path}: {item_count} items")
+
+    def _on_source_error(self, source: Tuple[Path, Path, Path, Path], error: Exception):
+        """Handle file processing errors."""
+        file_path, rel_path, _, _ = source
+        logger.error(f"Error reading file {rel_path}: {error}")
 
     def _resolve_image_path(self, image_path: str, source_dir_path: str) -> str:
         """
@@ -378,8 +493,11 @@ class MultimodalDirectoryJSONLDataLoader(JSONLLoaderMixin, MultimodalDataLoader)
 
     def load(self) -> Iterator[MultimodalLoadResult]:
         """Yield MultimodalLoadResult objects from directory JSONL data."""
-        # In non-streaming mode, iterate over pre-loaded data
-        if not self.streaming:
+        if self.streaming:
+            # Use StreamingLoaderMixin template method
+            yield from self._stream_load()
+        else:
+            # Batch mode: iterate over pre-loaded data
             for item in self.data:
                 prompt = self.extract_prompt(item)
                 if prompt is None:
@@ -398,56 +516,6 @@ class MultimodalDirectoryJSONLDataLoader(JSONLLoaderMixin, MultimodalDataLoader)
                     request_id=str(request_id),
                     additional_data=additional_data or None
                 )
-            return
-
-        # Streaming mode: read files on-demand
-        for file_path in self.files:
-            rel_path = file_path.relative_to(self.input_dir)
-            rel_dir = rel_path.parent
-            source_dir = file_path.parent
-
-            try:
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    for line_num, line in enumerate(f, 1):
-                        line = line.strip()
-                        if not line:
-                            continue
-
-                        try:
-                            # Use the mixin's parse_line method for extensibility
-                            obj = self.parse_line(line, line_num, str(rel_path))
-                            if obj is None:
-                                # Line was skipped by the mixin
-                                continue
-
-                            # Add source information
-                            obj['_source_file'] = str(rel_path)
-                            obj['_source_dir'] = str(rel_dir) if rel_dir != Path('.') else ''
-                            obj['_source_dir_path'] = str(source_dir)
-
-                            prompt = self.extract_prompt(obj)
-                            if prompt is None:
-                                logger.debug(f"Skipping item {rel_path}:{line_num}: no '{self.prompt_field}' field")
-                                continue
-
-                            request_id = self.extract_request_id(obj, f"{rel_path}:{line_num}")
-                            images = self.extract_images(obj)
-
-                            # Extract additional data with proper field exclusion
-                            additional_data = self._extract_additional_data_multimodal(obj)
-
-                            yield self._create_multimodal_result(
-                                text=prompt,
-                                images=images,
-                                request_id=str(request_id),
-                                additional_data=additional_data or None
-                            )
-                        except json.JSONDecodeError as e:
-                            logger.warning(f"Invalid JSON in {rel_path}:{line_num}: {e}")
-                            continue
-            except IOError as e:
-                logger.error(f"Error reading file {rel_path}: {e}")
-                continue
 
     def _extract_additional_data_multimodal(self, item: Dict[str, Any]) -> Dict[str, Any]:
         """

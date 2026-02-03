@@ -5,14 +5,14 @@ Saves inference results to output files while preserving the input
 directory structure. Results from the same source file are grouped
 into corresponding output files.
 """
-import threading
 from pathlib import Path
 
 from .base import ResultSaver, SaveResult
 from .jsonl_mixin import JSONLSaverMixin
+from .streaming_mixin import StreamingSaverMixin
 
 
-class DirectoryJSONLResultSaver(JSONLSaverMixin, ResultSaver):
+class DirectoryJSONLResultSaver(StreamingSaverMixin, JSONLSaverMixin, ResultSaver):
     """
     Save inference results to JSONL files, preserving input directory structure.
 
@@ -48,9 +48,11 @@ class DirectoryJSONLResultSaver(JSONLSaverMixin, ResultSaver):
         # Create output directory
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
+        # Initialize streaming configuration from StreamingSaverMixin
+        self._initialize_streaming()
+
         # Track open files: {output_path: file_handle}
         self._files = {}
-        self._lock = threading.Lock()
 
     def _get_output_path(self, result: SaveResult) -> Path:
         """
@@ -84,24 +86,49 @@ class DirectoryJSONLResultSaver(JSONLSaverMixin, ResultSaver):
 
         return output_path
 
-    def _get_file_handle(self, output_path: Path):
+    def _format_result(self, result: SaveResult) -> str:
         """
-        Get or create a file handle for the given output path.
+        Format a result for JSONL output.
 
-        Thread-safe file handle management.
+        Uses the JSONLSaverMixin's process_result_to_line template method.
+
+        Args:
+            result: The SaveResult to format
+
+        Returns:
+            JSONL line string (without newline)
         """
-        # Check if file is already open
+        return self.process_result_to_line(result)
+
+    def _write_result(self, output_path: Path, formatted_data: str) -> None:
+        """
+        Write formatted data to the output path.
+
+        Thread-safe file handle management with file pooling.
+
+        Args:
+            output_path: Path where data should be written
+            formatted_data: JSONL line string to write
+        """
+        # Get or create file handle
+        if output_path not in self._files:
+            # Create parent directory if needed
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            # Open file in append mode
+            self._files[output_path] = open(output_path, 'a', encoding='utf-8')
+
+        file_handle = self._files[output_path]
+        file_handle.write(formatted_data + '\n')
+
+    def _flush(self, output_path: Path):
+        """
+        Flush output to disk.
+
+        Args:
+            output_path: Path that needs flushing
+        """
         if output_path in self._files:
-            return self._files[output_path]
-
-        # Create parent directory if needed
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-
-        # Open file in append mode
-        file_handle = open(output_path, 'a', encoding='utf-8')
-        self._files[output_path] = file_handle
-
-        return file_handle
+            self._files[output_path].flush()
 
     def save(self, result: SaveResult):
         """
@@ -109,17 +136,9 @@ class DirectoryJSONLResultSaver(JSONLSaverMixin, ResultSaver):
 
         Thread-safe for concurrent writes. Results from the same source
         file are grouped together in the corresponding output location.
-        Uses the mixin's process_result_to_line template method.
+        Uses the StreamingSaverMixin template method.
         """
-        output_path = self._get_output_path(result)
-
-        # Use the mixin's template method for processing
-        line = self.process_result_to_line(result)
-
-        with self._lock:
-            file_handle = self._get_file_handle(output_path)
-            file_handle.write(line + '\n')
-            file_handle.flush()  # Ensure data is written immediately
+        self._stream_save(result)
 
     def cleanup(self):
         """Close all open files."""
