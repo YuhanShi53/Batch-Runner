@@ -131,9 +131,10 @@ class CheckpointManager:
         Returns:
             True if request was already completed
         """
-        if self.data is None:
-            return False
-        return request_id in self.data.completed_request_ids
+        with self._lock:
+            if self.data is None:
+                return False
+            return request_id in self.data.completed_request_ids
 
     def mark_completed(
         self,
