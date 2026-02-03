@@ -70,12 +70,12 @@ class ModelAdapter(ABC):
         Get the chat completions endpoint URL.
 
         Args:
-            base_url: Base URL of the server (e.g., "http://localhost:8000/v1")
+            base_url: Base URL of the server (e.g., "http://localhost:8000")
 
         Returns:
             Full URL to the chat completions endpoint
         """
-        return f"{base_url}/chat/completions"
+        return f"{base_url}/v1/chat/completions"
 
     def get_health_url(self, base_url: str) -> str:
         """

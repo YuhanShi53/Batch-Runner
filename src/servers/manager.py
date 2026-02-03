@@ -52,7 +52,7 @@ class VLLMServer:
     @property
     def base_url(self) -> str:
         """Get the base URL for the server."""
-        return f"http://{self.ip}:{self.port}/v1"
+        return f"http://{self.ip}:{self.port}"
 
     def health_url(self) -> str:
         """Get the health check URL."""
@@ -60,7 +60,7 @@ class VLLMServer:
 
     def chat_url(self) -> str:
         """Get the chat completions URL."""
-        return f"{self.base_url}/chat/completions"
+        return f"{self.base_url}/v1/chat/completions"
 
 
 class VLLMServerManager:
