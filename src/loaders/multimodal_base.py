@@ -4,12 +4,13 @@ Multimodal data loader base module.
 Provides abstract base class for loaders that handle both text and image data.
 Supports OpenAI-compatible vision API format.
 """
+import os
+import base64
+import logging
 from abc import abstractmethod
 from typing import Iterator, Dict, Any, Optional, List, Union
 from pathlib import Path
 from dataclasses import dataclass
-import base64
-import logging
 
 from .base import DataLoader, LoadResult
 
@@ -166,7 +167,7 @@ class MultimodalDataLoader(DataLoader):
                     processed.append(img)
             else:
                 # Use as-is (path or URL)
-                processed.append(img)
+                processed.append(f"file://{os.path.join(self.image_base_dir, img)}")
 
         return processed
 
