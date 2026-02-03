@@ -101,6 +101,7 @@ def _validate_config(config: Dict[str, Any]):
         'allow_unhealthy_fallback': False,
         'success_rate_threshold': 0.5,
         'success_rate_window': 10,
+        'max_active_requests': 50,
     }
 
     for key, value in runner_defaults.items():

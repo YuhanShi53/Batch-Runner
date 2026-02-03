@@ -53,6 +53,7 @@ class BatchConfig:
     allow_unhealthy_fallback: bool = False
     success_rate_threshold: float = 0.5
     success_rate_window: int = 10
+    max_active_requests: int = 50
 
     # Progress settings
     progress_report_interval: int = 10
@@ -181,12 +182,14 @@ class BatchRunner:
         allow_fallback = config.get('allow_unhealthy_fallback', False)
         success_rate_threshold = config.get('success_rate_threshold', 0.5)
         success_rate_window = config.get('success_rate_window', 10)
+        max_active_requests = config.get('max_active_requests', 50)
         self.load_balancer = LoadBalancer(
             self.server_manager.get_all_servers(),
             strategy=config.load_balancing_strategy,
             allow_fallback=allow_fallback,
             success_rate_threshold=success_rate_threshold,
-            success_rate_window=success_rate_window
+            success_rate_window=success_rate_window,
+            max_active_requests=max_active_requests
         )
 
         # Initialize checkpoint manager if enabled
