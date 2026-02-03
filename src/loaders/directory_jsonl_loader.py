@@ -531,8 +531,7 @@ class MultimodalDirectoryJSONLDataLoader(StreamingLoaderMixin, JSONLLoaderMixin,
         """
         excluded_fields = {
             self.prompt_field, self.id_field,
-            self.image_field, self.images_field,
-            '_source_file', '_source_dir', '_source_dir_path'
+            self.image_field, self.images_field
         }
         return {
             k: v for k, v in item.items()
