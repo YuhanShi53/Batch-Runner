@@ -396,6 +396,42 @@ python -m src.cli --config configs/config.yaml [选项]
   --verbose, -v      启用详细日志
 ```
 
+## 日志配置
+
+### 启用 DEBUG 日志
+
+在配置文件中设置日志级别为 DEBUG 可以查看详细的请求信息，包括发给模型的 messages 内容：
+
+```yaml
+logging:
+  level: DEBUG
+  file: logs/debug.log  # 可选：保存到文件
+```
+
+启用 DEBUG 日志后会输出：
+- 每个请求的完整 messages 内容
+- 请求的 request_id
+- 服务器选择和负载均衡详情
+- 重试和错误详情
+
+**运行示例**：
+
+```bash
+# 方法 1: 通过配置文件
+python -m src.cli --config configs/config.yaml
+
+# 方法 2: 使用命令行 --verbose 标志（启用 INFO 级别）
+python -m src.cli --config configs/config.yaml --verbose
+```
+
+**DEBUG 日志输出示例**：
+
+```
+DEBUG:src.batch_runner:Sending request sample_1 with messages:
+[{'role': 'system', 'content': 'You are a helpful assistant.'},
+ {'role': 'user', 'content': 'What is the capital of France?'}]
+```
+
 ## 使用示例
 
 ### 流式处理大数据集 🆕

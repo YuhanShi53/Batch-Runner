@@ -459,6 +459,9 @@ class BatchRunner:
         if self.config.system_prompt:
             messages = [{"role": "system", "content": self.config.system_prompt}] + messages
 
+        # Log messages at DEBUG level for inspection
+        self.logger.debug(f"Sending request {request.request_id} with messages:\n{messages}")
+
         # Build request payload using adapter
         payload = self.config.adapter.build_request(
             model_name=self.config.model_name,
