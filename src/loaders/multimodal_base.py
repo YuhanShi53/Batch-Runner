@@ -198,13 +198,6 @@ class MultimodalDataLoader(DataLoader):
         """
         content = []
 
-        # Add text content
-        if text:
-            content.append({
-                "type": "text",
-                "text": text
-            })
-
         # Add image content
         if images:
             processed_images = self._process_images(images)
@@ -215,6 +208,13 @@ class MultimodalDataLoader(DataLoader):
                         "url": img
                     }
                 })
+
+        # Add text content
+        if text:
+            content.append({
+                "type": "text",
+                "text": text
+            })
 
         return content
 
