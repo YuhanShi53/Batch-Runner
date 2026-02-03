@@ -51,6 +51,8 @@ class BatchConfig:
     health_check_interval: int = 30
     max_failures: int = 5
     allow_unhealthy_fallback: bool = False
+    success_rate_threshold: float = 0.5
+    success_rate_window: int = 10
 
     # Progress settings
     progress_report_interval: int = 10
