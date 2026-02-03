@@ -78,7 +78,7 @@ class CheckpointManager:
         """
         self.checkpoint_path = Path(checkpoint_path)
         self.save_interval = save_interval
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
         self.data: Optional[CheckpointData] = None
         self._pending_count = 0
