@@ -10,7 +10,7 @@ from typing import Iterator, Dict, Any, Optional, List, Tuple
 from pathlib import Path
 import logging
 
-from .base import LoadResult
+from .base import LoadResult, SaveResult
 
 
 logger = logging.getLogger(__name__)
@@ -232,7 +232,7 @@ class JSONLSaverMixin:
                 }
     """
 
-    def format_result(self, result: 'SaveResult') -> Dict[str, Any]:
+    def format_result(self, result: SaveResult) -> Dict[str, Any]:
         """
         Format a SaveResult into a dictionary for JSONL output.
 
@@ -288,7 +288,7 @@ class JSONLSaverMixin:
         """
         return json.dumps(output_data, ensure_ascii=False)
 
-    def process_result_to_line(self, result: 'SaveResult') -> str:
+    def process_result_to_line(self, result: SaveResult) -> str:
         """
         Process a SaveResult into a JSONL line string.
 

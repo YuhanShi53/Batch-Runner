@@ -9,6 +9,8 @@ import json
 from typing import Dict, Any
 from datetime import datetime
 
+from .base import SaveResult
+
 
 class JSONLSaverMixin:
     """
@@ -27,7 +29,7 @@ class JSONLSaverMixin:
                 }
     """
 
-    def format_result(self, result: 'SaveResult') -> Dict[str, Any]:
+    def format_result(self, result: SaveResult) -> Dict[str, Any]:
         """
         Format a SaveResult into a dictionary for JSONL output.
 
@@ -81,7 +83,7 @@ class JSONLSaverMixin:
         """
         return json.dumps(output_data, ensure_ascii=False)
 
-    def process_result_to_line(self, result: 'SaveResult') -> str:
+    def process_result_to_line(self, result: SaveResult) -> str:
         """
         Process a SaveResult into a JSONL line string.
 
