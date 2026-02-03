@@ -177,10 +177,14 @@ class BatchRunner:
 
         # Initialize load balancer with current server list
         allow_fallback = config.get('allow_unhealthy_fallback', False)
+        success_rate_threshold = config.get('success_rate_threshold', 0.5)
+        success_rate_window = config.get('success_rate_window', 10)
         self.load_balancer = LoadBalancer(
             self.server_manager.get_all_servers(),
             strategy=config.load_balancing_strategy,
-            allow_fallback=allow_fallback
+            allow_fallback=allow_fallback,
+            success_rate_threshold=success_rate_threshold,
+            success_rate_window=success_rate_window
         )
 
         # Initialize checkpoint manager if enabled
@@ -453,57 +457,71 @@ class BatchRunner:
         if not server:
             raise RuntimeError("No healthy servers available")
 
-        # Prepare messages
-        messages = list(request.messages)
-        # Prepend system prompt if configured
-        if self.config.system_prompt:
-            messages = [{"role": "system", "content": self.config.system_prompt}] + messages
+        # Increment active request count for load balancing
+        server.increment_active()
 
-        # Log messages at DEBUG level for inspection
-        self.logger.debug(f"Sending request {request.request_id} with messages:\n{messages}")
+        try:
+            # Prepare messages
+            messages = list(request.messages)
+            # Prepend system prompt if configured
+            if self.config.system_prompt:
+                messages = [{"role": "system", "content": self.config.system_prompt}] + messages
 
-        # Build request payload using adapter
-        payload = self.config.adapter.build_request(
-            model_name=self.config.model_name,
-            messages=messages,
-            temperature=self.config.temperature,
-            max_tokens=self.config.max_tokens,
-            top_p=self.config.top_p,
-            frequency_penalty=self.config.frequency_penalty,
-            presence_penalty=self.config.presence_penalty,
-        )
+            # Log messages at DEBUG level for inspection
+            self.logger.debug(f"Sending request {request.request_id} with messages:\n{messages}")
 
-        # Send request with retry (tracks if retried)
-        was_retried, response = self._send_request_with_retry(server, payload)
-
-        # Parse response using adapter
-        model_output = self.config.adapter.parse_response(response) if response else {}
-
-        # Save result
-        save_result = SaveResult(
-            request_id=request.request_id,
-            model_output=model_output,
-            additional_data=request.additional_data
-        )
-        self.saver.save(save_result)
-
-        # Update statistics
-        self.stats.increment_completed()
-        tokens = model_output.get('usage', {}).get('total_tokens', 0)
-        self.stats.add_tokens(tokens)
-        server.request_count += 1
-
-        # Update checkpoint
-        if self.checkpoint_manager:
-            self.checkpoint_manager.mark_completed(
-                request_id=request.request_id,
-                tokens=tokens,
-                retried=was_retried
+            # Build request payload using adapter
+            payload = self.config.adapter.build_request(
+                model_name=self.config.model_name,
+                messages=messages,
+                temperature=self.config.temperature,
+                max_tokens=self.config.max_tokens,
+                top_p=self.config.top_p,
+                frequency_penalty=self.config.frequency_penalty,
+                presence_penalty=self.config.presence_penalty,
             )
-            self.checkpoint_manager.maybe_save()
 
-        # Update progress
-        self.progress_tracker.update(1)
+            # Send request with retry (tracks if retried)
+            was_retried, response = self._send_request_with_retry(server, payload)
+
+            # Parse response using adapter
+            model_output = self.config.adapter.parse_response(response) if response else {}
+
+            # Save result
+            save_result = SaveResult(
+                request_id=request.request_id,
+                model_output=model_output,
+                additional_data=request.additional_data
+            )
+            self.saver.save(save_result)
+
+            # Update statistics
+            self.stats.increment_completed()
+            tokens = model_output.get('usage', {}).get('total_tokens', 0)
+            self.stats.add_tokens(tokens)
+
+            # Record successful request on server
+            server.record_success()
+
+            # Update checkpoint
+            if self.checkpoint_manager:
+                self.checkpoint_manager.mark_completed(
+                    request_id=request.request_id,
+                    tokens=tokens,
+                    retried=was_retried
+                )
+                self.checkpoint_manager.maybe_save()
+
+            # Update progress
+            self.progress_tracker.update(1)
+
+        except Exception as e:
+            # Record failed request on server
+            server.record_error()
+            self.logger.error(
+                f"Request {request.request_id} failed on server {server.name}: {e}"
+            )
+            raise
 
     def _send_request_with_retry(self, server, payload: dict):
         """

@@ -99,6 +99,8 @@ def _validate_config(config: Dict[str, Any]):
         'health_check_interval': 30,
         'max_failures': 5,
         'allow_unhealthy_fallback': False,
+        'success_rate_threshold': 0.5,
+        'success_rate_window': 10,
     }
 
     for key, value in runner_defaults.items():

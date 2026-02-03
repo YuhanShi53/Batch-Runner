@@ -50,6 +50,10 @@ runner:
   max_failures: 5  # Max consecutive failures before marking server as unhealthy
   allow_unhealthy_fallback: false  # If true, allows routing to unhealthy servers when no healthy ones available
 
+  # Success rate tracking (for least_connections strategy)
+  success_rate_threshold: 0.5  # Minimum success rate (0.0-1.0) for server to be preferred
+  success_rate_window: 10  # Number of requests needed before success rate is considered reliable
+
   # Model adapter configuration
   adapter_class: OpenAIAdapter  # Options: OpenAIAdapter, SimpleAdapter, or custom
   adapter_params: {}  # Additional parameters to pass to adapter

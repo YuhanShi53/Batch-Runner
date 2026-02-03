@@ -39,6 +39,10 @@ class VLLMServer:
         failure_count: Number of consecutive failures
         last_health_check: Timestamp of last health check
         last_state_change: Timestamp of last state change
+        success_count: Number of successful requests
+        error_count: Number of request errors (timeouts, failures, etc.)
+        active_requests: Number of currently active (in-flight) requests
+        _lock: Thread lock for atomic updates to stats
     """
     name: str
     ip: str
@@ -48,6 +52,10 @@ class VLLMServer:
     failure_count: int = 0
     last_health_check: float = field(default_factory=time.time)
     last_state_change: float = field(default_factory=time.time)
+    success_count: int = 0
+    error_count: int = 0
+    active_requests: int = 0
+    _lock: threading.Lock = field(default_factory=threading.Lock)
 
     @property
     def base_url(self) -> str:
@@ -61,6 +69,81 @@ class VLLMServer:
     def chat_url(self) -> str:
         """Get the chat completions URL."""
         return f"{self.base_url}/v1/chat/completions"
+
+    @property
+    def success_rate(self) -> float:
+        """
+        Calculate success rate for this server.
+
+        Returns:
+            Success rate as a float between 0.0 and 1.0.
+            Returns 1.0 if no requests have been made.
+        """
+        with self._lock:
+            total = self.success_count + self.error_count
+            if total == 0:
+                return 1.0
+            return self.success_count / total
+
+    @property
+    def effective_load(self) -> int:
+        """
+        Get the effective load considering both active requests and error rate.
+
+        Servers with low success rates have higher effective load to discourage
+        routing when they're underperforming.
+
+        Returns:
+            Effective load score (higher = more loaded/less desirable)
+        """
+        with self._lock:
+            # Base load is active requests
+            base_load = self.active_requests
+
+            # Apply penalty for low success rate
+            # If success rate is 50%, effective load doubles
+            # If success rate is 25%, effective load quadruples
+            success_rate = self.success_rate
+            if success_rate < 1.0:
+                penalty_factor = 1.0 / max(success_rate, 0.1)  # Cap at 10x penalty
+                return int(base_load * penalty_factor)
+            return base_load
+
+    def increment_active(self) -> int:
+        """
+        Increment active request count.
+
+        Returns:
+            New active request count
+        """
+        with self._lock:
+            self.active_requests += 1
+            return self.active_requests
+
+    def decrement_active(self) -> int:
+        """
+        Decrement active request count.
+
+        Returns:
+            New active request count
+        """
+        with self._lock:
+            self.active_requests = max(0, self.active_requests - 1)
+            return self.active_requests
+
+    def record_success(self) -> None:
+        """Record a successful request completion."""
+        with self._lock:
+            self.success_count += 1
+            self.request_count += 1
+            self.active_requests = max(0, self.active_requests - 1)
+
+    def record_error(self) -> None:
+        """Record a failed request."""
+        with self._lock:
+            self.error_count += 1
+            self.request_count += 1
+            self.active_requests = max(0, self.active_requests - 1)
 
 
 class VLLMServerManager:
