@@ -394,7 +394,7 @@ class BatchRunner:
 
                 # Update progress periodically
                 if processed_count % 100 == 0:
-                    self.logger.info(f"Queued {processed_count} requests for processing...")
+                    self.logger.debug(f"Queued {processed_count} requests for processing...")
 
                 # Clean up completed futures to prevent memory buildup
                 futures = [f for f in futures if not f.done()]
