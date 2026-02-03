@@ -32,14 +32,35 @@ class ResultSaver(ABC):
     Users inherit from this class to implement custom result saving logic.
     The saver must be thread-safe for concurrent writing.
 
-    Example:
+    This base class provides integration points with various mixins:
+    - StreamingSaverMixin: For immediate write-back
+    - OutputFormatterMixin: For flexible output formatting
+    - MultimodalOutputMixin: For multimodal output handling
+    - BatchWriterMixin: For batched writing optimization
+
+    Example (basic):
         >>> class MySaver(ResultSaver):
         ...     def _initialize(self):
         ...         self.file = open(self.config['output_path'], 'w')
         ...
         ...     def save(self, result: SaveResult):
-        ...         content = result.model_output['choices'][0]['message']['content']
-        ...         self.file.write(f"{result.request_id}\\t{content}\\n")
+        ...         output = self.format_output(result)
+        ...         self.file.write(json.dumps(output) + '\\n')
+
+    Example (with mixins):
+        >>> class MyStreamingSaver(StreamingSaverMixin,
+        ...                         OutputFormatterMixin,
+        ...                         ResultSaver):
+        ...     def _initialize(self):
+        ...         self._initialize_streaming()
+        ...         self.output_path = Path(self.config['output_path'])
+        ...
+        ...     def _get_output_path(self, result):
+        ...         return self.output_path
+        ...
+        ...     def _write_result(self, path, formatted_data):
+        ...         with open(path, 'a') as f:
+        ...             f.write(json.dumps(formatted_data) + '\\n')
     """
 
     def __init__(self, config: Dict[str, Any]):
@@ -86,6 +107,54 @@ class ResultSaver(ABC):
         """
         for result in results:
             self.save(result)
+
+    # ===== Integration hooks for mixins =====
+
+    def format_output(self, result: SaveResult) -> Dict[str, Any]:
+        """
+        Format a SaveResult into a dictionary for output.
+
+        This method provides a default implementation. Subclasses can
+        override this directly or use OutputFormatterMixin for more options.
+
+        Args:
+            result: SaveResult object containing model output and metadata
+
+        Returns:
+            Dictionary to be serialized/written to output
+        """
+        from datetime import datetime
+
+        output_data = {
+            'request_id': result.request_id,
+            'model_output': result.model_output,
+            'additional_data': result.additional_data,
+            'timestamp': datetime.now().isoformat()
+        }
+
+        if result.error:
+            output_data['error'] = result.error
+
+        return output_data
+
+    def extract_content(self, result: SaveResult) -> Optional[str]:
+        """
+        Extract the main content from a SaveResult.
+
+        This is a convenience method for subclasses.
+
+        Args:
+            result: SaveResult object
+
+        Returns:
+            Generated text content, or None if not found
+        """
+        try:
+            return result.model_output['choices'][0]['message']['content']
+        except (KeyError, IndexError, TypeError):
+            return None
+
+    # ===== Standard dunder methods =====
 
     def cleanup(self):
         """

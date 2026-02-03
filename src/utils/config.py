@@ -2,6 +2,7 @@
 Configuration loading and management module.
 
 Loads YAML configuration files and dynamically imports loader/saver classes.
+Integrates with the registration system for custom loaders/savers.
 """
 import yaml
 import importlib
@@ -11,6 +12,11 @@ from typing import Dict, Any, Type
 from ..loaders.base import DataLoader
 from ..savers.base import ResultSaver
 from ..adapters.base import ModelAdapter
+from .registry import (
+    get_registered_loader,
+    get_registered_saver,
+    load_custom_modules_from_config
+)
 
 
 def load_config(config_path: str) -> Dict[str, Any]:
@@ -33,6 +39,9 @@ def load_config(config_path: str) -> Dict[str, Any]:
 
     with open(config_file, 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
+
+    # Load custom modules before validation (in case they register loaders/savers)
+    load_custom_modules_from_config(config)
 
     # Validate required fields
     _validate_config(config)
@@ -101,6 +110,11 @@ def get_loader_class(class_name: str, module_prefix: str = 'src.loaders') -> Typ
     """
     Dynamically import loader class.
 
+    Checks in this order:
+    1. Custom registered loaders (via @register_loader decorator)
+    2. Built-in loaders
+    3. Custom modules in src/loaders directory
+
     Args:
         class_name: Name of the loader class (e.g., 'JSONDataLoader')
         module_prefix: Module prefix for import (default: 'src.loaders')
@@ -110,7 +124,20 @@ def get_loader_class(class_name: str, module_prefix: str = 'src.loaders') -> Typ
 
     Raises:
         ValueError: If class is not found
+
+    Example:
+        # Use a built-in loader
+        loader_class = get_loader_class('JSONDataLoader')
+
+        # Use a custom registered loader
+        # (assuming MyCustomLoader was registered with @register_loader)
+        loader_class = get_loader_class('MyCustomLoader')
     """
+    # Check custom registered loaders first
+    custom_loader = get_registered_loader(class_name)
+    if custom_loader is not None:
+        return custom_loader
+
     # Built-in loaders
     builtin_loaders = {
         'JSONDataLoader': 'json_loader',
@@ -123,25 +150,35 @@ def get_loader_class(class_name: str, module_prefix: str = 'src.loaders') -> Typ
         'MultimodalDirectoryJSONLDataLoader': 'directory_jsonl_loader',
     }
 
-    if class_name not in builtin_loaders:
-        # Try to import from custom module
-        # Assume class_name is defined in a file named after the class (snake_case)
-        module_name = _camel_to_snake(class_name)
-        try:
-            module = importlib.import_module(f'{module_prefix}.{module_name}')
-            return getattr(module, class_name)
-        except (ImportError, AttributeError) as e:
-            raise ValueError(f"Unknown loader class: {class_name}. Error: {e}")
+    if class_name in builtin_loaders:
+        # Import built-in loader
+        module_name = builtin_loaders[class_name]
+        module = importlib.import_module(f'{module_prefix}.{module_name}')
+        return getattr(module, class_name)
 
-    # Import built-in loader
-    module_name = builtin_loaders[class_name]
-    module = importlib.import_module(f'{module_prefix}.{module_name}')
-    return getattr(module, class_name)
+    # Try to import from custom module
+    # Assume class_name is defined in a file named after the class (snake_case)
+    module_name = _camel_to_snake(class_name)
+    try:
+        module = importlib.import_module(f'{module_prefix}.{module_name}')
+        return getattr(module, class_name)
+    except (ImportError, AttributeError) as e:
+        raise ValueError(
+            f"Unknown loader class: {class_name}. "
+            f"Error: {e}. "
+            f"Make sure the class is registered with @register_loader decorator "
+            f"or defined in {module_prefix}/{module_name}.py"
+        )
 
 
 def get_saver_class(class_name: str, module_prefix: str = 'src.savers') -> Type[ResultSaver]:
     """
     Dynamically import saver class.
+
+    Checks in this order:
+    1. Custom registered savers (via @register_saver decorator)
+    2. Built-in savers
+    3. Custom modules in src/savers directory
 
     Args:
         class_name: Name of the saver class (e.g., 'JSONResultSaver')
@@ -152,7 +189,20 @@ def get_saver_class(class_name: str, module_prefix: str = 'src.savers') -> Type[
 
     Raises:
         ValueError: If class is not found
+
+    Example:
+        # Use a built-in saver
+        saver_class = get_saver_class('JSONLResultSaver')
+
+        # Use a custom registered saver
+        # (assuming MyCustomSaver was registered with @register_saver)
+        saver_class = get_saver_class('MyCustomSaver')
     """
+    # Check custom registered savers first
+    custom_saver = get_registered_saver(class_name)
+    if custom_saver is not None:
+        return custom_saver
+
     # Built-in savers
     builtin_savers = {
         'JSONResultSaver': 'json_saver',
@@ -162,19 +212,24 @@ def get_saver_class(class_name: str, module_prefix: str = 'src.savers') -> Type[
         'DirectoryJSONLResultSaver': 'directory_jsonl_saver',
     }
 
-    if class_name not in builtin_savers:
-        # Try to import from custom module
-        module_name = _camel_to_snake(class_name)
-        try:
-            module = importlib.import_module(f'{module_prefix}.{module_name}')
-            return getattr(module, class_name)
-        except (ImportError, AttributeError) as e:
-            raise ValueError(f"Unknown saver class: {class_name}. Error: {e}")
+    if class_name in builtin_savers:
+        # Import built-in saver
+        module_name = builtin_savers[class_name]
+        module = importlib.import_module(f'{module_prefix}.{module_name}')
+        return getattr(module, class_name)
 
-    # Import built-in saver
-    module_name = builtin_savers[class_name]
-    module = importlib.import_module(f'{module_prefix}.{module_name}')
-    return getattr(module, class_name)
+    # Try to import from custom module
+    module_name = _camel_to_snake(class_name)
+    try:
+        module = importlib.import_module(f'{module_prefix}.{module_name}')
+        return getattr(module, class_name)
+    except (ImportError, AttributeError) as e:
+        raise ValueError(
+            f"Unknown saver class: {class_name}. "
+            f"Error: {e}. "
+            f"Make sure the class is registered with @register_saver decorator "
+            f"or defined in {module_prefix}/{module_name}.py"
+        )
 
 
 def _camel_to_snake(name: str) -> str:

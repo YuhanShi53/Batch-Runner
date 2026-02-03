@@ -4,7 +4,7 @@ DataLoader base module.
 Provides abstract base class for all data loaders.
 """
 from abc import ABC, abstractmethod
-from typing import Iterator, Dict, Any, Optional
+from typing import Iterator, Dict, Any, Optional, List
 from dataclasses import dataclass
 
 
@@ -30,7 +30,13 @@ class DataLoader(ABC):
     Users inherit from this class to implement custom data loading logic.
     The loader must be thread-safe for concurrent data reading.
 
-    Example:
+    This base class provides integration points with various mixins:
+    - StreamingLoaderMixin: For on-demand data loading
+    - MessagesBuilderMixin: For flexible message construction
+    - PromptExtractorMixin: For customizable prompt extraction
+    - MultimodalInputMixin: For multimodal input handling
+
+    Example (basic):
         >>> class MyLoader(DataLoader):
         ...     def _initialize(self):
         ...         self.data = [{"text": "Hello", "id": "1"}]
@@ -38,9 +44,28 @@ class DataLoader(ABC):
         ...     def load(self):
         ...         for item in self.data:
         ...             yield LoadResult(
-        ...                 messages=[{"role": "user", "content": item["text"]}],
+        ...                 messages=self.build_messages(item["text"]),
         ...                 request_id=item["id"]
         ...             )
+
+    Example (with mixins):
+        >>> class MyStreamingLoader(StreamingLoaderMixin,
+        ...                         MessagesBuilderMixin,
+        ...                         DataLoader):
+        ...     def _initialize(self):
+        ...         self._initialize_streaming()
+        ...         self.input_path = Path(self.config['input_path'])
+        ...
+        ...     def _discover_sources(self):
+        ...         return list(self.input_path.glob('*.jsonl'))
+        ...
+        ...     def _process_source(self, source):
+        ...         with open(source) as f:
+        ...             for line in f:
+        ...                 item = json.loads(line)
+        ...                 prompt = self.extract_prompt(item)
+        ...                 messages = self.build_messages(prompt, item)
+        ...                 yield LoadResult(messages, item['id'], item)
     """
 
     def __init__(self, config: Dict[str, Any]):
@@ -78,6 +103,46 @@ class DataLoader(ABC):
             ...     )
         """
         pass
+
+    # ===== Integration hooks for mixins =====
+
+    def build_messages(
+        self,
+        prompt: str,
+        additional_data: Optional[Dict[str, Any]] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Build OpenAI-format messages from a prompt.
+
+        This method provides a default implementation. Subclasses can
+        override this directly or use MessagesBuilderMixin for more options.
+
+        Args:
+            prompt: The text prompt
+            additional_data: Optional additional data from the source
+
+        Returns:
+            List of message dictionaries in OpenAI format
+        """
+        return [{"role": "user", "content": prompt}]
+
+    def extract_prompt(self, item: Dict[str, Any]) -> Optional[str]:
+        """
+        Extract prompt text from a data item.
+
+        This method provides a default implementation. Subclasses can
+        override this directly or use PromptExtractorMixin for more options.
+
+        Args:
+            item: Dictionary representing a data item
+
+        Returns:
+            Prompt string, or None if not found
+        """
+        prompt_field = getattr(self, 'prompt_field', 'prompt')
+        return item.get(prompt_field)
+
+    # ===== Standard dunder methods =====
 
     def __iter__(self):
         """Make the loader iterable."""

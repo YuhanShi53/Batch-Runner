@@ -1,28 +1,33 @@
 """
-JSONL processing mixins for customizable line parsing.
+JSONL processing mixins for customizable line parsing (loaders only).
 
 These mixins provide a template method pattern where users can override
 specific methods to customize JSONL line processing without rewriting
-the entire loader/saver.
+the entire loader.
+
+Note: For saver mixins, see src/savers/jsonl_mixin.py
 """
 import json
 from typing import Iterator, Dict, Any, Optional, List, Tuple
 from pathlib import Path
 import logging
 
-from .base import LoadResult, SaveResult
+from .base import LoadResult
+from .streaming_mixin import MessagesBuilderMixin, PromptExtractorMixin
 
 
 logger = logging.getLogger(__name__)
 
 
-class JSONLLoaderMixin:
+class JSONLLoaderMixin(PromptExtractorMixin):
     """
     Mixin class that provides customizable JSONL line parsing for loaders.
 
     This mixin implements the Template Method pattern, allowing subclasses
     to customize how individual JSONL lines are parsed without rewriting
     the entire loading logic.
+
+    Integrates with PromptExtractorMixin for flexible prompt extraction.
 
     Usage:
         class MyCustomLoader(JSONLLoaderMixin, DataLoader):
@@ -31,6 +36,10 @@ class JSONLLoaderMixin:
                 obj = json.loads(line)
                 # Transform the data as needed
                 return obj
+
+            def extract_prompt(self, item):
+                # Custom prompt extraction
+                return item.get('custom_prompt_field')
     """
 
     def parse_line(self, line: str, line_num: int, source: str) -> Optional[Dict[str, Any]]:
@@ -108,30 +117,6 @@ class JSONLLoaderMixin:
         request_id = item.get(id_field, default_id)
         return str(request_id)
 
-    def extract_prompt(self, item: Dict[str, Any]) -> Optional[str]:
-        """
-        Extract prompt text from parsed item.
-
-        Override this method to customize prompt extraction.
-        Default implementation uses configured prompt_field.
-
-        Args:
-            item: Parsed dictionary from parse_line()
-
-        Returns:
-            Prompt string, or None if not found
-
-        Example override:
-            def extract_prompt(self, item: Dict[str, Any]) -> Optional[str]:
-                # Try multiple fields in order
-                for field in ['prompt', 'question', 'text', 'input']:
-                    if field in item:
-                        return str(item[field])
-                return None
-        """
-        prompt_field = getattr(self, 'prompt_field', 'prompt')
-        return item.get(prompt_field)
-
     def extract_additional_data(self, item: Dict[str, Any]) -> Dict[str, Any]:
         """
         Extract additional data from parsed item.
@@ -196,11 +181,16 @@ class JSONLLoaderMixin:
             logger.debug(f"Skipping item in {source}:{line_num}")
             return None
 
-        # Extract prompt
+        # Extract prompt (uses PromptExtractorMixin.extract_prompt if available,
+        # otherwise uses the method defined in this class)
         prompt = self.extract_prompt(item)
         if prompt is None:
             logger.debug(f"Skipping item in {source}:{line_num}: no prompt found")
             return None
+
+        # Transform prompt if transform_prompt is available
+        if hasattr(self, 'transform_prompt'):
+            prompt = self.transform_prompt(prompt, item)
 
         # Extract request_id
         request_id = self.extract_request_id(item, default_id)
@@ -208,102 +198,14 @@ class JSONLLoaderMixin:
         # Extract additional data
         additional_data = self.extract_additional_data(item)
 
+        # Build messages (uses MessagesBuilderMixin.build_messages if available)
+        if hasattr(self, 'build_messages'):
+            messages = self.build_messages(prompt, additional_data)
+        else:
+            messages = [{"role": "user", "content": prompt}]
+
         return LoadResult(
-            messages=[{"role": "user", "content": prompt}],
+            messages=messages,
             request_id=request_id,
             additional_data=additional_data or None
         )
-
-
-class JSONLSaverMixin:
-    """
-    Mixin class that provides customizable JSONL line formatting for savers.
-
-    This mixin implements the Template Method pattern, allowing subclasses
-    to customize how results are formatted for JSONL output.
-
-    Usage:
-        class MyCustomSaver(JSONLSaverMixin, ResultSaver):
-            def format_result(self, result: SaveResult) -> Dict[str, Any]:
-                # Custom formatting logic
-                return {
-                    "id": result.request_id,
-                    "output": result.model_output['choices'][0]['message']['content']
-                }
-    """
-
-    def format_result(self, result: SaveResult) -> Dict[str, Any]:
-        """
-        Format a SaveResult into a dictionary for JSONL output.
-
-        This method can be overridden to customize output format.
-        Default implementation creates a standard structure.
-
-        Args:
-            result: SaveResult object containing model output and metadata
-
-        Returns:
-            Dictionary to be serialized as JSON
-
-        Example override:
-            def format_result(self, result: SaveResult) -> Dict[str, Any]:
-                content = result.model_output['choices'][0]['message']['content']
-                return {
-                    "id": result.request_id,
-                    "response": content,
-                    "tokens": result.model_output.get('usage', {}).get('total_tokens', 0)
-                }
-        """
-        from datetime import datetime
-
-        output_data = {
-            'request_id': result.request_id,
-            'model_output': result.model_output,
-            'additional_data': result.additional_data,
-            'timestamp': datetime.now().isoformat()
-        }
-
-        if result.error:
-            output_data['error'] = result.error
-
-        return output_data
-
-    def serialize_output(self, output_data: Dict[str, Any]) -> str:
-        """
-        Serialize formatted output dictionary to JSON string.
-
-        Override this method to customize serialization behavior.
-        Default implementation uses json.dumps().
-
-        Args:
-            output_data: Dictionary from format_result()
-
-        Returns:
-            JSON string
-
-        Example override:
-            def serialize_output(self, output_data: Dict[str, Any]) -> str:
-                # Custom serialization with specific options
-                return json.dumps(output_data, ensure_ascii=False, indent=None)
-        """
-        return json.dumps(output_data, ensure_ascii=False)
-
-    def process_result_to_line(self, result: SaveResult) -> str:
-        """
-        Process a SaveResult into a JSONL line string.
-
-        This is the main template method that orchestrates the formatting process.
-        Override individual methods above to customize behavior.
-
-        Args:
-            result: SaveResult object containing model output and metadata
-
-        Returns:
-            JSON string ready to be written to file (without newline)
-
-        Example:
-            >>> line = self.process_result_to_line(result)
-            >>> file.write(line + '\\n')
-        """
-        output_data = self.format_result(result)
-        return self.serialize_output(output_data)

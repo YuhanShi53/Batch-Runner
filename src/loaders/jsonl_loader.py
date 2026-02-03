@@ -5,6 +5,7 @@ Loads inference requests from a JSONL file.
 Each line is a separate JSON object representing one data sample.
 
 Supports both text-only and multimodal (text + images) data.
+Supports both streaming and batch modes.
 """
 import json
 from typing import Iterator, Dict, Any, Optional, List
@@ -32,12 +33,7 @@ class JSONLDataLoader(JSONLLoaderMixin, DataLoader):
         file_path: Path to JSONL file
         prompt_field: Field name containing the prompt (default: "prompt")
         id_field: Field name containing the ID (default: "id")
-        multimodal: Set to True to enable multimodal support (default: False)
-        image_base_dir: Base directory for relative image paths (default: "")
-        encode_images: Whether to encode images to base64 (default: True)
-
-    For multimodal mode, set multimodal: True in config.
-    See MultimodalJSONLDataLoader for details.
+        streaming: Enable streaming mode (default: True for efficiency)
 
     Customization:
         Override methods from JSONLLoaderMixin to customize parsing:
@@ -46,6 +42,7 @@ class JSONLDataLoader(JSONLLoaderMixin, DataLoader):
         - extract_request_id(): Custom ID extraction
         - extract_prompt(): Custom prompt extraction
         - extract_additional_data(): Custom additional data extraction
+        - build_messages(): Custom message construction (from MessagesBuilderMixin)
 
     Example:
         class MyLoader(JSONLDataLoader):
@@ -62,49 +59,83 @@ class JSONLDataLoader(JSONLLoaderMixin, DataLoader):
         self.file_path = Path(self.config['file_path'])
         self.prompt_field = self.config.get('prompt_field', 'prompt')
         self.id_field = self.config.get('id_field', 'id')
+        self.streaming = self.config.get('streaming', True)
 
         if not self.file_path.exists():
             raise FileNotFoundError(f"JSONL file not found: {self.file_path}")
 
-        # Load all lines into memory
-        self.data = []
-        with open(self.file_path, 'r', encoding='utf-8') as f:
-            for line_num, line in enumerate(f, 1):
-                line = line.strip()
-                if not line:  # Skip empty lines
-                    continue
+        if self.streaming:
+            logger.info(f"Streaming mode enabled for {self.file_path}")
+        else:
+            # Batch mode: Load all lines into memory
+            logger.info(f"Batch mode: loading all data from {self.file_path} into memory")
+            self.data = []
+            with open(self.file_path, 'r', encoding='utf-8') as f:
+                for line_num, line in enumerate(f, 1):
+                    line = line.strip()
+                    if not line:  # Skip empty lines
+                        continue
 
-                try:
-                    # Use the mixin's parse_line method for extensibility
-                    obj = self.parse_line(line, line_num, str(self.file_path))
-                    if obj is not None:
-                        self.data.append(obj)
-                except json.JSONDecodeError as e:
-                    raise ValueError(f"Invalid JSON on line {line_num}: {e}")
+                    try:
+                        # Use the mixin's parse_line method for extensibility
+                        obj = self.parse_line(line, line_num, str(self.file_path))
+                        if obj is not None:
+                            self.data.append(obj)
+                    except json.JSONDecodeError as e:
+                        raise ValueError(f"Invalid JSON on line {line_num}: {e}")
 
-        if not self.data:
-            raise ValueError(f"No valid JSON objects found in {self.file_path}")
+            if not self.data:
+                raise ValueError(f"No valid JSON objects found in {self.file_path}")
+
+            logger.info(f"Loaded {len(self.data)} items into memory")
 
     def load(self) -> Iterator[LoadResult]:
         """Yield LoadResult objects from JSONL data."""
-        for idx, item in enumerate(self.data, 1):
-            # Use the mixin's template method for processing
-            default_id = f"req_{idx}"
-            prompt = self.extract_prompt(item)
+        if self.streaming:
+            # Streaming mode: read file line by line
+            with open(self.file_path, 'r', encoding='utf-8') as f:
+                for line_num, line in enumerate(f, 1):
+                    line = line.strip()
+                    if not line:
+                        continue
 
-            if prompt is None:
-                continue
+                    result = self.process_line_to_load_result(
+                        line=line,
+                        line_num=line_num,
+                        source=str(self.file_path),
+                        default_id=f"req_{line_num}"
+                    )
 
-            request_id = self.extract_request_id(item, default_id)
-            additional_data = self.extract_additional_data(item)
+                    if result is not None:
+                        yield result
+        else:
+            # Batch mode: iterate over pre-loaded data
+            for idx, item in enumerate(self.data, 1):
+                # Use the mixin's template method for processing
+                default_id = f"req_{idx}"
+                prompt = self.extract_prompt(item)
 
-            yield LoadResult(
-                messages=[{"role": "user", "content": prompt}],
-                request_id=str(request_id),
-                additional_data=additional_data or None
-            )
+                if prompt is None:
+                    continue
+
+                request_id = self.extract_request_id(item, default_id)
+                additional_data = self.extract_additional_data(item)
+
+                # Build messages (supports MessagesBuilderMixin)
+                if hasattr(self, 'build_messages'):
+                    messages = self.build_messages(prompt, additional_data)
+                else:
+                    messages = [{"role": "user", "content": prompt}]
+
+                yield LoadResult(
+                    messages=messages,
+                    request_id=str(request_id),
+                    additional_data=additional_data or None
+                )
 
     def __len__(self):
+        if self.streaming:
+            raise NotImplementedError("Cannot get length in streaming mode")
         return len(self.data)
 
 
