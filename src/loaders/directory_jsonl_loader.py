@@ -185,23 +185,31 @@ class DirectoryJSONLDataLoader(StreamingLoaderMixin, MessagesBuilderMixin, JSONL
             yield from self._stream_load()
         else:
             # Batch mode: iterate over pre-loaded data
-            for item in self.data:
-                prompt = self.extract_prompt(item)
-                if prompt is None:
-                    logger.debug(f"Skipping item: no '{self.prompt_field}' field")
+            for idx, item in enumerate(self.data, 1):
+                try:
+                    prompt = self.extract_prompt(item)
+                    if prompt is None:
+                        logger.debug(
+                            f"Skipping item: no '{self.prompt_field}' field"
+                        )
+                        continue
+
+                    request_id = self.extract_request_id(item, f"req_{id(item)}")
+                    additional_data = self.extract_additional_data(item)
+
+                    # Build messages using MessagesBuilderMixin
+                    messages = self.build_messages(prompt, additional_data)
+
+                    yield LoadResult(
+                        messages=messages,
+                        request_id=str(request_id),
+                        additional_data=additional_data or None
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"Unexpected error processing item at index {idx}: {e}"
+                    )
                     continue
-
-                request_id = self.extract_request_id(item, f"req_{id(item)}")
-                additional_data = self.extract_additional_data(item)
-
-                # Build messages using MessagesBuilderMixin
-                messages = self.build_messages(prompt, additional_data)
-
-                yield LoadResult(
-                    messages=messages,
-                    request_id=str(request_id),
-                    additional_data=additional_data or None
-                )
 
     def __len__(self):
         if not self.streaming:
@@ -498,24 +506,32 @@ class MultimodalDirectoryJSONLDataLoader(StreamingLoaderMixin, JSONLLoaderMixin,
             yield from self._stream_load()
         else:
             # Batch mode: iterate over pre-loaded data
-            for item in self.data:
-                prompt = self.extract_prompt(item)
-                if prompt is None:
-                    logger.debug(f"Skipping item: no '{self.prompt_field}' field")
+            for idx, item in enumerate(self.data, 1):
+                try:
+                    prompt = self.extract_prompt(item)
+                    if prompt is None:
+                        logger.debug(
+                            f"Skipping item: no '{self.prompt_field}' field"
+                        )
+                        continue
+
+                    request_id = self.extract_request_id(item, f"req_{id(item)}")
+                    images = self.extract_images(item)
+
+                    # Extract additional data with proper field exclusion
+                    additional_data = self._extract_additional_data_multimodal(item)
+
+                    yield self._create_multimodal_result(
+                        text=prompt,
+                        images=images,
+                        request_id=str(request_id),
+                        additional_data=additional_data or None
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"Unexpected error processing item at index {idx}: {e}"
+                    )
                     continue
-
-                request_id = self.extract_request_id(item, f"req_{id(item)}")
-                images = self.extract_images(item)
-
-                # Extract additional data with proper field exclusion
-                additional_data = self._extract_additional_data_multimodal(item)
-
-                yield self._create_multimodal_result(
-                    text=prompt,
-                    images=images,
-                    request_id=str(request_id),
-                    additional_data=additional_data or None
-                )
 
     def _extract_additional_data_multimodal(self, item: Dict[str, Any]) -> Dict[str, Any]:
         """

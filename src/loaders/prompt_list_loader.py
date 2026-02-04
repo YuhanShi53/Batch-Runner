@@ -3,9 +3,13 @@ Simple prompt list data loader implementation.
 
 Loads inference requests from a list of prompts in configuration.
 """
-from typing import Iterator, Dict, Any, List
+import logging
+from typing import Iterator
 
 from .base import DataLoader, LoadResult
+
+
+logger = logging.getLogger(__name__)
 
 
 class PromptListLoader(DataLoader):
@@ -54,14 +58,23 @@ class PromptListLoader(DataLoader):
 
     def load(self) -> Iterator[LoadResult]:
         """Yield LoadResult objects from prompt list."""
-        for item in self.data:
-            additional_data = {k: v for k, v in item.items() if k not in ['prompt', 'id']}
+        for idx, item in enumerate(self.data, 1):
+            try:
+                additional_data = {
+                    k: v for k, v in item.items()
+                    if k not in ['prompt', 'id']
+                }
 
-            yield LoadResult(
-                messages=[{"role": "user", "content": item['prompt']}],
-                request_id=item['id'],
-                additional_data=additional_data or None
-            )
+                yield LoadResult(
+                    messages=[{"role": "user", "content": item['prompt']}],
+                    request_id=item['id'],
+                    additional_data=additional_data or None
+                )
+            except Exception as e:
+                logger.error(
+                    f"Unexpected error processing prompt at index {idx}: {e}"
+                )
+                continue
 
     def __len__(self):
         return len(self.data)

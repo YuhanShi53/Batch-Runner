@@ -171,41 +171,46 @@ class JSONLLoaderMixin(PromptExtractorMixin):
         Raises:
             json.JSONDecodeError: If JSON parsing fails
         """
-        # Parse the line
-        item = self.parse_line(line, line_num, source)
-        if item is None:
+        try:
+            # Parse the line
+            item = self.parse_line(line, line_num, source)
+            if item is None:
+                return None
+
+            # Check if we should skip this item
+            if self.should_skip_item(item):
+                logger.debug(f"Skipping item in {source}:{line_num}")
+                return None
+
+            # Extract prompt (uses PromptExtractorMixin.extract_prompt if available,
+            # otherwise uses the method defined in this class)
+            prompt = self.extract_prompt(item)
+            if prompt is None:
+                logger.debug(f"Skipping item in {source}:{line_num}: no prompt found")
+                return None
+
+            # Transform prompt if transform_prompt is available
+            if hasattr(self, 'transform_prompt'):
+                prompt = self.transform_prompt(prompt, item)
+
+            # Extract request_id
+            request_id = self.extract_request_id(item, default_id)
+
+            # Extract additional data
+            additional_data = self.extract_additional_data(item)
+
+            # Build messages (uses MessagesBuilderMixin.build_messages if available)
+            if hasattr(self, 'build_messages'):
+                messages = self.build_messages(prompt, additional_data)
+            else:
+                messages = [{"role": "user", "content": prompt}]
+
+            return LoadResult(
+                messages=messages,
+                request_id=request_id,
+                additional_data=additional_data or None
+            )
+        except Exception as e:
+            # Catch unexpected errors and log them, but don't stop iteration
+            logger.error(f"Unexpected error processing {source}:{line_num}: {e}")
             return None
-
-        # Check if we should skip this item
-        if self.should_skip_item(item):
-            logger.debug(f"Skipping item in {source}:{line_num}")
-            return None
-
-        # Extract prompt (uses PromptExtractorMixin.extract_prompt if available,
-        # otherwise uses the method defined in this class)
-        prompt = self.extract_prompt(item)
-        if prompt is None:
-            logger.debug(f"Skipping item in {source}:{line_num}: no prompt found")
-            return None
-
-        # Transform prompt if transform_prompt is available
-        if hasattr(self, 'transform_prompt'):
-            prompt = self.transform_prompt(prompt, item)
-
-        # Extract request_id
-        request_id = self.extract_request_id(item, default_id)
-
-        # Extract additional data
-        additional_data = self.extract_additional_data(item)
-
-        # Build messages (uses MessagesBuilderMixin.build_messages if available)
-        if hasattr(self, 'build_messages'):
-            messages = self.build_messages(prompt, additional_data)
-        else:
-            messages = [{"role": "user", "content": prompt}]
-
-        return LoadResult(
-            messages=messages,
-            request_id=request_id,
-            additional_data=additional_data or None
-        )

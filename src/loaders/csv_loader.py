@@ -4,10 +4,14 @@ CSV file data loader implementation.
 Loads inference requests from a CSV file.
 """
 import csv
-from typing import Iterator, Dict, Any
+import logging
+from typing import Iterator
 from pathlib import Path
 
 from .base import DataLoader, LoadResult
+
+
+logger = logging.getLogger(__name__)
 
 
 class CSVDataLoader(DataLoader):
@@ -47,24 +51,30 @@ class CSVDataLoader(DataLoader):
 
     def load(self) -> Iterator[LoadResult]:
         """Yield LoadResult objects from CSV data."""
-        for item in self.data:
-            prompt = item.get(self.prompt_field, '')
-            request_id = item.get(self.id_field, f"req_{id(item)}")
+        for idx, item in enumerate(self.data, 1):
+            try:
+                prompt = item.get(self.prompt_field, '')
+                request_id = item.get(self.id_field, f"req_{id(item)}")
 
-            if not prompt:
+                if not prompt:
+                    continue
+
+                # Extract additional data
+                additional_data = {
+                    k: v for k, v in item.items()
+                    if k not in [self.prompt_field, self.id_field] and v
+                }
+
+                yield LoadResult(
+                    messages=[{"role": "user", "content": prompt}],
+                    request_id=str(request_id),
+                    additional_data=additional_data or None
+                )
+            except Exception as e:
+                logger.error(
+                    f"Unexpected error processing CSV row at index {idx}: {e}"
+                )
                 continue
-
-            # Extract additional data
-            additional_data = {
-                k: v for k, v in item.items()
-                if k not in [self.prompt_field, self.id_field] and v
-            }
-
-            yield LoadResult(
-                messages=[{"role": "user", "content": prompt}],
-                request_id=str(request_id),
-                additional_data=additional_data or None
-            )
 
     def __len__(self):
         return self._len

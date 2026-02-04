@@ -51,24 +51,32 @@ class JSONDataLoader(DataLoader):
 
     def load(self) -> Iterator[LoadResult]:
         """Yield LoadResult objects from JSON data."""
-        for item in self.data:
-            prompt = item.get(self.prompt_field)
-            request_id = item.get(self.id_field, f"req_{id(item)}")
+        for idx, item in enumerate(self.data, 1):
+            try:
+                prompt = item.get(self.prompt_field)
+                request_id = item.get(
+                    self.id_field, f"req_{id(item)}"
+                )
 
-            if prompt is None:
+                if prompt is None:
+                    continue
+
+                # Extract additional data (everything except prompt and id)
+                additional_data = {
+                    k: v for k, v in item.items()
+                    if k not in [self.prompt_field, self.id_field]
+                }
+
+                yield LoadResult(
+                    messages=[{"role": "user", "content": prompt}],
+                    request_id=str(request_id),
+                    additional_data=additional_data or None
+                )
+            except Exception as e:
+                logger.error(
+                    f"Unexpected error processing item at index {idx}: {e}"
+                )
                 continue
-
-            # Extract additional data (everything except prompt and id)
-            additional_data = {
-                k: v for k, v in item.items()
-                if k not in [self.prompt_field, self.id_field]
-            }
-
-            yield LoadResult(
-                messages=[{"role": "user", "content": prompt}],
-                request_id=str(request_id),
-                additional_data=additional_data or None
-            )
 
     def __len__(self):
         return len(self.data)
@@ -157,31 +165,42 @@ class MultimodalJSONDataLoader(MultimodalDataLoader):
 
     def load(self) -> Iterator[MultimodalLoadResult]:
         """Yield MultimodalLoadResult objects from JSON data."""
-        for item in self.data:
-            prompt = item.get(self.prompt_field)
-            request_id = item.get(self.id_field, f"req_{id(item)}")
+        for idx, item in enumerate(self.data, 1):
+            try:
+                prompt = item.get(self.prompt_field)
+                request_id = item.get(self.id_field, f"req_{id(item)}")
 
-            if prompt is None:
-                logger.debug(f"Skipping item {request_id}: no '{self.prompt_field}' field")
+                if prompt is None:
+                    logger.debug(
+                        f"Skipping item {request_id}: no '{self.prompt_field}' field"
+                    )
+                    continue
+
+                # Extract images
+                images = self._extract_images(item)
+
+                # Extract additional data (exclude prompt, id, and image fields)
+                excluded_fields = {
+                    self.prompt_field, self.id_field,
+                    self.image_field, self.images_field
+                }
+                additional_data = {
+                    k: v for k, v in item.items()
+                    if k not in excluded_fields
+                }
+
+                # Create multimodal result
+                yield self._create_multimodal_result(
+                    text=prompt,
+                    images=images,
+                    request_id=str(request_id),
+                    additional_data=additional_data or None
+                )
+            except Exception as e:
+                logger.error(
+                    f"Unexpected error processing item at index {idx}: {e}"
+                )
                 continue
-
-            # Extract images
-            images = self._extract_images(item)
-
-            # Extract additional data (exclude prompt, id, and image fields)
-            excluded_fields = {self.prompt_field, self.id_field, self.image_field, self.images_field}
-            additional_data = {
-                k: v for k, v in item.items()
-                if k not in excluded_fields
-            }
-
-            # Create multimodal result
-            yield self._create_multimodal_result(
-                text=prompt,
-                images=images,
-                request_id=str(request_id),
-                additional_data=additional_data or None
-            )
 
     def __len__(self):
         return len(self.data)

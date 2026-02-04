@@ -136,24 +136,30 @@ class JSONLDataLoader(StreamingLoaderMixin, MessagesBuilderMixin, JSONLLoaderMix
         else:
             # Batch mode: iterate over pre-loaded data
             for idx, item in enumerate(self.data, 1):
-                # Use the mixin's template method for processing
-                default_id = f"req_{idx}"
-                prompt = self.extract_prompt(item)
+                try:
+                    # Use the mixin's template method for processing
+                    default_id = f"req_{idx}"
+                    prompt = self.extract_prompt(item)
 
-                if prompt is None:
+                    if prompt is None:
+                        continue
+
+                    request_id = self.extract_request_id(item, default_id)
+                    additional_data = self.extract_additional_data(item)
+
+                    # Build messages (supports MessagesBuilderMixin)
+                    messages = self.build_messages(prompt, additional_data)
+
+                    yield LoadResult(
+                        messages=messages,
+                        request_id=str(request_id),
+                        additional_data=additional_data or None
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"Unexpected error processing item at index {idx}: {e}"
+                    )
                     continue
-
-                request_id = self.extract_request_id(item, default_id)
-                additional_data = self.extract_additional_data(item)
-
-                # Build messages (supports MessagesBuilderMixin)
-                messages = self.build_messages(prompt, additional_data)
-
-                yield LoadResult(
-                    messages=messages,
-                    request_id=str(request_id),
-                    additional_data=additional_data or None
-                )
 
     def __len__(self):
         if self.streaming:
@@ -381,28 +387,36 @@ class MultimodalJSONLDataLoader(StreamingLoaderMixin, JSONLLoaderMixin, Multimod
         else:
             # Batch mode: iterate over pre-loaded data
             for idx, item in enumerate(self.data, 1):
-                # Use the mixin's extract_prompt method
-                prompt = self.extract_prompt(item)
-                if prompt is None:
-                    logger.debug(f"Skipping item {idx}: no '{self.prompt_field}' field")
+                try:
+                    # Use the mixin's extract_prompt method
+                    prompt = self.extract_prompt(item)
+                    if prompt is None:
+                        logger.debug(
+                            f"Skipping item {idx}: no '{self.prompt_field}' field"
+                        )
+                        continue
+
+                    # Use the mixin's extract_request_id method
+                    request_id = self.extract_request_id(item, f"req_{idx}")
+
+                    # Extract images using custom method
+                    images = self.extract_images(item)
+
+                    # Extract additional data using custom method
+                    additional_data = self.extract_additional_data(item)
+
+                    # Create multimodal result
+                    yield self._create_multimodal_result(
+                        text=prompt,
+                        images=images,
+                        request_id=str(request_id),
+                        additional_data=additional_data or None
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"Unexpected error processing item at index {idx}: {e}"
+                    )
                     continue
-
-                # Use the mixin's extract_request_id method
-                request_id = self.extract_request_id(item, f"req_{idx}")
-
-                # Extract images using custom method
-                images = self.extract_images(item)
-
-                # Extract additional data using custom method
-                additional_data = self.extract_additional_data(item)
-
-                # Create multimodal result
-                yield self._create_multimodal_result(
-                    text=prompt,
-                    images=images,
-                    request_id=str(request_id),
-                    additional_data=additional_data or None
-                )
 
     def __len__(self):
         if self.streaming:
