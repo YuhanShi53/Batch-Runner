@@ -598,12 +598,14 @@ class BatchRunner:
             nonlocal was_retried
             # Use adapter's get_chat_url to build the endpoint
             url = self.config.adapter.get_chat_url(server.base_url)
+            self.logger.debug(f"Sending request to {url}")
             response = requests.post(
                 url,
                 json=payload,
                 timeout=self.config.request_timeout
             )
             response.raise_for_status()
+            self.logger.debug(f"Received response from {url}")
             was_retried = False  # Success, no retry needed
             return response
 
