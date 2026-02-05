@@ -604,8 +604,8 @@ class BatchRunner:
                 json=payload,
                 timeout=self.config.request_timeout
             )
+            self.logger.debug(f"Response: {response.content}")
             response.raise_for_status()
-            self.logger.debug(f"Received response from {url}")
             was_retried = False  # Success, no retry needed
             return response
 

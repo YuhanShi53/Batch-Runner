@@ -9,6 +9,7 @@ from typing import Dict, Any, Optional, List
 from pathlib import Path
 import logging
 import threading
+import traceback
 
 from .base import SaveResult
 
@@ -199,7 +200,7 @@ class StreamingSaverMixin:
                 logger.error(f"Failed to save {result.request_id}: {error}")
                 raise  # Re-raise to stop entire batch
         """
-        logger.warning(f"Error saving result {result.request_id}: {error}. Skipping.")
+        logger.warning(f"Error saving result {result.request_id}: {error}. Skipping.\n{traceback.format_exc()}")
 
     def _stream_save(self, result: SaveResult) -> None:
         """
