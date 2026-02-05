@@ -53,11 +53,6 @@ runner:
   # Adapter (OpenAI adapter supports vision API)
   adapter_class: OpenAIAdapter
 
-  # Checkpoint (for resumable processing)
-  enable_checkpoint: true
-  checkpoint_path: checkpoints/vision_checkpoint.json
-  checkpoint_interval: 10
-
 logging:
   level: INFO
   file: logs/vision_inference.log

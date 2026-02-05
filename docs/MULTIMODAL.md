@@ -253,13 +253,7 @@ loader:
 2. **Encoding Costs**: Base64 encoding increases size by ~33%. Consider URLs for large images.
 3. **Concurrent Requests**: Vision models are resource-intensive. Use lower concurrency.
 4. **Timeout**: Vision requests take longer. Set `request_timeout` to 180s or more.
-5. **Error Handling**: Enable checkpoints for long-running vision batches:
-   ```yaml
-   runner:
-     enable_checkpoint: true
-     checkpoint_interval: 10
-   ```
-6. **Validation**: Test with a few samples before processing large datasets.
+5. **Validation**: Test with a few samples before processing large datasets.
 
 ## Performance Considerations
 

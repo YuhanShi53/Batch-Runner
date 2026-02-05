@@ -71,11 +71,6 @@ runner:
   # - Recommended: 2-3x max_concurrency for optimal balance
   stream_queue_size: 100  # Default: 100
 
-  # Checkpoint configuration (for resumable batch processing)
-  enable_checkpoint: false  # Set to true to enable checkpoint/resume functionality
-  checkpoint_path: checkpoints/batch_checkpoint.json
-  checkpoint_interval: 10  # Save checkpoint every N completions
-
 # Logging Configuration
 logging:
   level: INFO  # Options: DEBUG, INFO, WARNING, ERROR

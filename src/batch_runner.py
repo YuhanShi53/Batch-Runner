@@ -29,7 +29,6 @@ from .servers.manager import VLLMServerManager
 from .servers.load_balancer import LoadBalancer
 from .utils.progress import ProgressTracker
 from .utils.retry import retry_with_backoff
-from .utils.checkpoint import CheckpointManager
 from .adapters.base import ModelAdapter
 
 
@@ -72,11 +71,6 @@ class BatchConfig:
     # Adapter settings
     adapter_class: str = "OpenAIAdapter"
     adapter: ModelAdapter = None
-
-    # Checkpoint settings
-    enable_checkpoint: bool = False
-    checkpoint_path: str = "checkpoints/batch_checkpoint.json"
-    checkpoint_interval: int = 10
 
     # Streaming settings
     streaming: bool = True
@@ -198,18 +192,11 @@ class BatchRunner:
             max_active_requests=max_active_requests
         )
 
-        # Initialize checkpoint manager if enabled
-        self.checkpoint_manager: Optional[CheckpointManager] = None
-        if config.enable_checkpoint:
-            self.checkpoint_manager = CheckpointManager(
-                checkpoint_path=config.checkpoint_path,
-                save_interval=config.checkpoint_interval
-            )
-
         # Progress tracking
         self.progress_tracker = ProgressTracker(
             total_items=self._estimate_total_items(),
-            report_interval=config.progress_report_interval
+            report_interval=config.progress_report_interval,
+            stats=self.stats  # Pass stats for detailed reporting
         )
 
         # Request queue (list for non-streaming, queue.Queue for streaming)
@@ -255,38 +242,6 @@ class BatchRunner:
         self.stats.total_requests = total_requests
         self.logger.info(f"Total requests to process: {total_requests}")
 
-        # Load checkpoint and filter completed requests
-        if self.checkpoint_manager:
-            checkpoint_data = self.checkpoint_manager.load_or_create(total_requests)
-            completed_count = checkpoint_data.completed_count
-            failed_count = checkpoint_data.failed_count
-
-            if completed_count > 0 or failed_count > 0:
-                self.logger.info(f"Resuming from checkpoint: {completed_count} completed, {failed_count} failed")
-                # Restore stats from checkpoint
-                self.stats.completed_requests = checkpoint_data.completed_count
-                self.stats.failed_requests = checkpoint_data.failed_count
-                self.stats.retried_requests = checkpoint_data.retried_count
-                self.stats.total_tokens = checkpoint_data.total_tokens
-
-                # Filter out completed requests (keep failed requests for retry)
-                pending_requests = [
-                    req for req in self._request_list
-                    if not self.checkpoint_manager.is_completed(req.request_id)
-                ]
-                self._request_list = pending_requests
-                self.logger.info(f"Pending requests to process: {len(self._request_list)} (includes retries)")
-
-                # Update progress tracker to account for completed items
-                for _ in range(completed_count):
-                    self.progress_tracker.update(1)
-
-            if not self._request_list:
-                self.logger.info("All requests already completed!")
-                self.stats.end_time = time.time()
-                self._print_summary()
-                return
-
         # Process with thread pool
         with ThreadPoolExecutor(max_workers=self.config.max_concurrency) as executor:
             futures = {
@@ -300,10 +255,6 @@ class BatchRunner:
                 except Exception as e:
                     self.logger.error(f"Request processing failed: {e}")
                     self.stats.increment_failed()
-                    if self.checkpoint_manager:
-                        # Note: We can't get request_id here from the future
-                        # mark_failed will be called in _process_request exception handler
-                        self.checkpoint_manager.maybe_save()
 
         # Finalize
         self._finalize_batch(total_requests)
@@ -318,26 +269,6 @@ class BatchRunner:
 
         producer_exception = []
         total_requests = [0]  # Use list for mutability in nested function
-        skipped_count = [0]   # Track skipped requests (checkpoint resume)
-
-        # Load checkpoint if enabled
-        if self.checkpoint_manager:
-            # We don't know total yet in streaming mode, use 0 initially
-            checkpoint_data = self.checkpoint_manager.load_or_create(0)
-            completed_count = checkpoint_data.completed_count
-            failed_count = checkpoint_data.failed_count
-
-            if completed_count > 0 or failed_count > 0:
-                self.logger.info(f"Resuming from checkpoint: {completed_count} completed, {failed_count} failed")
-                # Restore stats from checkpoint
-                self.stats.completed_requests = checkpoint_data.completed_count
-                self.stats.failed_requests = checkpoint_data.failed_count
-                self.stats.retried_requests = checkpoint_data.retried_count
-                self.stats.total_tokens = checkpoint_data.total_tokens
-
-                # Update progress tracker to account for completed items
-                for _ in range(completed_count):
-                    self.progress_tracker.update(1)
 
         def producer():
             """Producer thread: stream data from loader into queue."""
@@ -395,19 +326,6 @@ class BatchRunner:
                 if request is None:
                     break
 
-                # Skip if already completed (checkpoint resume)
-                # Note: Failed requests are NOT skipped - they will be retried
-                if self.checkpoint_manager and self.checkpoint_manager.is_completed(request.request_id):
-                    self.logger.debug(f"Skipping already completed: {request.request_id}")
-                    skipped_count[0] += 1
-                    request_queue.task_done()
-                    continue
-
-                # Clear from failed set if we're retrying
-                if self.checkpoint_manager and self.checkpoint_manager.is_failed(request.request_id):
-                    self.logger.info(f"Retrying previously failed request: {request.request_id}")
-                    self.checkpoint_manager.clear_failed(request.request_id)
-
                 # Submit for processing
                 future = executor.submit(self._process_request, request)
                 futures.append(future)
@@ -428,18 +346,11 @@ class BatchRunner:
                 except Exception as e:
                     self.logger.error(f"Request processing failed: {e}")
                     self.stats.increment_failed()
-                    if self.checkpoint_manager:
-                        # Note: We can't get request_id here from the future
-                        # mark_failed will be called in _process_request exception handler
-                        self.checkpoint_manager.maybe_save()
 
         # Wait for producer to finish
         producer_thread.join(timeout=5.0)
         if producer_exception:
             raise producer_exception[0]
-
-        if skipped_count[0] > 0:
-            self.logger.info(f"Skipped {skipped_count[0]} already completed requests (checkpoint resume)")
 
         # Update total count now that we know it
         self.stats.total_requests = total_requests[0]
@@ -449,30 +360,10 @@ class BatchRunner:
 
     def _finalize_batch(self, total_requests: int):
         """Common finalization logic for both batch and streaming modes."""
-        # Retry failed requests before finalizing
-        if self.checkpoint_manager:
-            failed_ids = self.checkpoint_manager.get_failed_request_ids()
-            if failed_ids:
-                self.logger.info(f"Retrying {len(failed_ids)} failed requests...")
-                self._retry_failed_requests(failed_ids)
-
         self.stats.end_time = time.time()
         self.saver.cleanup()
         self.progress_tracker.finalize()
         self.server_manager.shutdown()
-
-        # Handle checkpoint after completion
-        if self.checkpoint_manager:
-            if self.stats.completed_requests == total_requests:
-                self.logger.info("All requests completed, deleting checkpoint")
-                self.checkpoint_manager.delete()
-            else:
-                # Still have failures after retry attempt
-                failed_ids = self.checkpoint_manager.get_failed_request_ids()
-                if failed_ids:
-                    self.logger.warning(f"Task completed with {len(failed_ids)} failed requests (check checkpoint for details)")
-                self.checkpoint_manager.save()
-
         self._print_summary()
 
     def _process_request(self, request: LoadResult):
@@ -482,17 +373,6 @@ class BatchRunner:
         Args:
             request: LoadResult containing messages and metadata
         """
-        # Check if already completed (for checkpoint resume)
-        if self.checkpoint_manager and self.checkpoint_manager.is_completed(request.request_id):
-            self.logger.debug(f"Skipping already completed request: {request.request_id}")
-            return
-
-        # Clear from failed set if we're retrying a failed request
-        if self.checkpoint_manager and self.checkpoint_manager.is_failed(request.request_id):
-            self.logger.info(f"Retrying previously failed request: {request.request_id}")
-            self.checkpoint_manager.clear_failed(request.request_id)
-            self.checkpoint_manager.maybe_save()
-
         server = self.load_balancer.get_server()
         if not server:
             raise RuntimeError("No healthy servers available")
@@ -543,15 +423,6 @@ class BatchRunner:
             # Record successful request on server
             server.record_success()
 
-            # Update checkpoint
-            if self.checkpoint_manager:
-                self.checkpoint_manager.mark_completed(
-                    request_id=request.request_id,
-                    tokens=tokens,
-                    retried=was_retried
-                )
-                self.checkpoint_manager.maybe_save()
-
             # Update progress
             self.progress_tracker.update(1)
 
@@ -561,26 +432,7 @@ class BatchRunner:
             self.logger.error(
                 f"Request {request.request_id} failed on server {server.name}: {e}"
             )
-
-            # Mark as failed in checkpoint for retry
-            if self.checkpoint_manager:
-                self.checkpoint_manager.mark_failed(request.request_id)
-                self.checkpoint_manager.maybe_save()
-
             raise
-
-    def _retry_failed_requests(self, failed_ids: set):
-        """
-        Note: Failed requests are automatically retried during normal execution
-        when resuming from checkpoint. This method is kept for future enhancements.
-
-        Args:
-            failed_ids: Set of failed request IDs
-        """
-        # Failed requests are already retried during checkpoint resume
-        # They remain in the pending request list and will be processed again
-        if failed_ids:
-            self.logger.info(f"Failed requests remain in checkpoint for next run (automatic retry on resume)")
 
     def _send_request_with_retry(self, server, payload: dict):
         """

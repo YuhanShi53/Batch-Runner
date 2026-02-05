@@ -14,7 +14,6 @@
 - **配置驱动**: 基于 YAML 的全组件配置
 - **服务器发现**: 从目录结构自动发现 vLLM 服务器
 - **健康检查**: 自动服务器健康监控和动态故障转移
-- **断点续跑**: 支持任务中断后从检查点恢复
 
 ### 新增功能 🆕
 
@@ -211,23 +210,6 @@ main()
 runner:
   system_prompt: "你是一个有帮助的助手，提供准确的答案。"
 ```
-
-### 断点续跑 (Checkpoint / Resume)
-
-启用检查点功能以支持中断任务恢复：
-
-```yaml
-runner:
-  enable_checkpoint: true
-  checkpoint_path: checkpoints/my_job_checkpoint.json
-  checkpoint_interval: 50  # 每 50 个请求保存一次检查点
-```
-
-启用后：
-- 进度会定期自动保存
-- 任务中断后重新运行相同命令即可恢复
-- 已完成的请求会被跳过
-- 任务成功完成后自动删除检查点
 
 ### 负载均衡策略
 
@@ -453,8 +435,6 @@ saver:
 
 runner:
   max_concurrency: 20
-  enable_checkpoint: true
-  checkpoint_interval: 100
 ```
 
 ### 多模态推理 🆕
@@ -497,17 +477,6 @@ python -m src.cli --config configs/config.yaml --concurrency 50
 python -m src.cli --config configs/config.yaml --temperature 0.5 --max-tokens 2000
 ```
 
-### 使用断点续跑
-
-1. 启用检查点功能运行任务：
-```bash
-python -m src.cli --config configs/examples/with_checkpoint.yaml
-```
-
-2. 如果任务中断（Ctrl+C 或错误），重新运行相同命令即可恢复
-
-3. 任务完成后检查点自动删除
-
 ## 项目结构
 
 ```
@@ -547,7 +516,6 @@ vllm_runner/
 │   └── examples/         # 示例配置
 ├── logs/                 # 日志文件
 ├── outputs/              # 输出文件
-├── checkpoints/          # 检查点文件
 └── requirements.txt
 ```
 
@@ -603,21 +571,19 @@ vllm_runner/
 - 初始化服务器管理器和负载均衡器
 - 并发处理请求（支持流式模式）
 - 失败重试
-- 断点续跑
 
 ### 6. 工具模块 ([`src/utils/`](src/utils/))
 - **config.py**: YAML 配置加载和动态导入
 - **logger.py**: 日志配置
 - **retry.py**: 带指数退避的重试装饰器
 - **progress.py**: 进度跟踪
-- **checkpoint.py**: 断点续跑检查点管理
 - **registry.py**: 组件注册系统 🆕
 
 ## 最佳实践
 
 ### 1. 大规模数据处理 🆕
 
-启用流式处理和断点续跑：
+启用流式处理：
 
 ```yaml
 loader:
@@ -627,8 +593,6 @@ loader:
     streaming: true  # 恒定内存占用
 
 runner:
-  enable_checkpoint: true
-  checkpoint_interval: 100
   max_concurrency: 20
 ```
 
@@ -660,7 +624,6 @@ saver:
 
 runner:
   max_concurrency: 10
-  enable_checkpoint: true
 ```
 
 ### 4. 自定义数据处理 🆕

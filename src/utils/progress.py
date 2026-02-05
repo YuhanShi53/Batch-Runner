@@ -21,6 +21,7 @@ class ProgressTracker:
         total_items: Total number of items to process (0 if unknown)
         completed_items: Number of items completed
         report_interval: Minimum seconds between progress reports
+        stats: Optional BatchStats for detailed reporting
     """
     total_items: int = 0
     report_interval: int = 10
@@ -28,6 +29,7 @@ class ProgressTracker:
     start_time: float = field(default_factory=time.time)
     last_report_time: float = field(default_factory=time.time)
     _lock: threading.Lock = field(default_factory=threading.Lock)
+    stats: Optional['BatchStats'] = field(default=None)
 
     def update(self, count: int = 1):
         """
@@ -47,10 +49,11 @@ class ProgressTracker:
 
     def _report(self):
         """Print progress report."""
+        elapsed = time.time() - self.start_time
+        rate = self.completed_items / elapsed if elapsed > 0 else 0
+
         if self.total_items > 0:
             percentage = (self.completed_items / self.total_items) * 100
-            elapsed = time.time() - self.start_time
-            rate = self.completed_items / elapsed if elapsed > 0 else 0
             eta = (self.total_items - self.completed_items) / rate if rate > 0 else 0
 
             logger.info(
@@ -60,13 +63,14 @@ class ProgressTracker:
                 f"ETA: {eta:.0f}s"
             )
         else:
-            elapsed = time.time() - self.start_time
-            rate = self.completed_items / elapsed if elapsed > 0 else 0
-
             logger.info(
                 f"[Progress] {self.completed_items} completed | "
                 f"Rate: {rate:.2f} items/sec"
             )
+
+        # Print detailed stats if available
+        if self.stats:
+            self._report_stats()
 
     def get_progress(self) -> dict:
         """
@@ -108,3 +112,36 @@ class ProgressTracker:
                     f"Total time: {elapsed:.2f}s | "
                     f"Avg rate: {rate:.2f} items/sec"
                 )
+
+        # Print detailed stats if available
+        if self.stats:
+            self._report_stats()
+
+    def _report_stats(self):
+        """Print detailed statistics from BatchStats."""
+        if not self.stats:
+            return
+
+        with self.stats._lock:
+            failed = self.stats.failed_requests
+            retried = self.stats.retried_requests
+            tokens = self.stats.total_tokens
+            total = self.stats.total_requests
+
+            # Calculate success rate
+            if total > 0:
+                success_rate = (self.completed_items / total) * 100
+            else:
+                success_rate = 0.0
+
+            parts = []
+            if failed > 0:
+                parts.append(f"Failed: {failed}")
+            if retried > 0:
+                parts.append(f"Retried: {retried}")
+            if tokens > 0:
+                parts.append(f"Tokens: {tokens:,}")
+            parts.append(f"Success: {success_rate:.1f}%")
+
+            stats_str = " | ".join(parts)
+            logger.info(f"[Stats] {stats_str}")
