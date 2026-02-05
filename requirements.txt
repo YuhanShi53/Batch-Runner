@@ -1,6 +1,7 @@
 # Core dependencies
 requests>=2.31.0
 pyyaml>=6.0.1
+httpx[http2]>=0.24.0
 
 # Optional dependencies for specific loaders/savers
 pandas>=2.0.0

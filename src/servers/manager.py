@@ -193,7 +193,7 @@ class VLLMServerManager:
             raise ValueError(f"Servers directory not found: {self.servers_dir}")
 
         for item in self.servers_dir.iterdir():
-            if not item.is_dir():
+            if item.is_dir():
                 continue
 
             match = re.match(self.server_pattern, item.name)

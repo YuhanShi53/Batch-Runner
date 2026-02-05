@@ -5,6 +5,7 @@ Coordinates data loading, server management, request processing, and result savi
 """
 import time
 import threading
+import asyncio
 from typing import Dict, Any, Optional, List
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -16,6 +17,11 @@ try:
     import requests
 except ImportError:
     requests = None
+
+try:
+    import httpx
+except ImportError:
+    httpx = None
 
 from .loaders.base import DataLoader, LoadResult
 from .savers.base import ResultSaver, SaveResult
@@ -578,40 +584,32 @@ class BatchRunner:
 
     def _send_request_with_retry(self, server, payload: dict):
         """
-        Send request to server with retry logic.
+        Send request to server with retry logic (uses async HTTP internally).
 
         Args:
             server: VLLMServer instance
             payload: Request payload
 
         Returns:
-            Tuple of (was_retried: bool, response: Response object)
+            Tuple of (was_retried: bool, response: dict)
         """
         was_retried = False
 
-        @retry_with_backoff(
-            max_retries=self.config.max_retries,
-            base_delay=self.config.retry_delay,
-            exceptions=(requests.exceptions.RequestException, requests.exceptions.Timeout)
-        )
-        def _send():
-            nonlocal was_retried
-            # Use adapter's get_chat_url to build the endpoint
-            url = self.config.adapter.get_chat_url(server.base_url)
-            self.logger.debug(f"Sending request to {url}")
-            response = requests.post(
-                url,
-                json=payload,
-                timeout=self.config.request_timeout
-            )
-            self.logger.debug(f"Response: {response.content}")
-            response.raise_for_status()
-            was_retried = False  # Success, no retry needed
-            return response
+        url = self.config.adapter.get_chat_url(server.base_url)
+        self.logger.debug(f"Sending async request to {url}")
 
         try:
-            result = _send()
-            return (was_retried, result)
+            # Run async HTTP request in current thread
+            response = asyncio.run(_send_http_request_async(
+                url=url,
+                payload=payload,
+                timeout=self.config.request_timeout,
+                max_retries=self.config.max_retries,
+                base_delay=self.config.retry_delay
+            ))
+            was_retried = False
+            return (was_retried, response)
+
         except Exception as e:
             was_retried = True
             self.stats.increment_retried()
@@ -635,3 +633,54 @@ class BatchRunner:
         # Print server stats
         lb_stats = self.load_balancer.get_stats()
         self.logger.info(f"Server Stats: {lb_stats}")
+
+
+async def _send_http_request_async(
+    url: str,
+    payload: dict,
+    timeout: int,
+    max_retries: int = 3,
+    base_delay: float = 1.0
+) -> dict:
+    """
+    Send async HTTP request with retry logic.
+
+    Args:
+        url: Request URL
+        payload: JSON payload
+        timeout: Request timeout in seconds
+        max_retries: Maximum retry attempts
+        base_delay: Base delay for exponential backoff
+
+    Returns:
+        Response JSON
+
+    Raises:
+        httpx.HTTPError: If all retries fail
+    """
+    if httpx is None:
+        raise ImportError("httpx is required. Install it with: pip install 'httpx[http2]'")
+
+    # Create client with connection pooling
+    limits = httpx.Limits(
+        max_connections=10000,
+        max_keepalive_connections=1000
+    )
+
+    async with httpx.AsyncClient(
+        limits=limits,
+        timeout=timeout,
+        http2=True
+    ) as client:
+        for attempt in range(max_retries + 1):
+            try:
+                response = await client.post(url, json=payload)
+                response.raise_for_status()
+                return response.json()
+
+            except (httpx.TimeoutException, httpx.ConnectError, httpx.HTTPStatusError) as e:
+                if attempt == max_retries:
+                    raise
+
+                delay = base_delay * (2 ** attempt)
+                await asyncio.sleep(delay)
