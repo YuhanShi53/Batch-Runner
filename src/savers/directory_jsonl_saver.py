@@ -5,11 +5,16 @@ Saves inference results to output files while preserving the input
 directory structure. Results from the same source file are grouped
 into corresponding output files.
 """
+import json
+import logging
 from pathlib import Path
 
 from .base import ResultSaver, SaveResult
 from .jsonl_mixin import JSONLSaverMixin
 from .streaming_mixin import StreamingSaverMixin
+
+
+logger = logging.getLogger(__name__)
 
 
 class DirectoryJSONLResultSaver(StreamingSaverMixin, JSONLSaverMixin, ResultSaver):
@@ -147,3 +152,59 @@ class DirectoryJSONLResultSaver(StreamingSaverMixin, JSONLSaverMixin, ResultSave
                 if not file_handle.closed:
                     file_handle.close()
             self._files.clear()
+
+    def _load_completed_ids(self) -> set:
+        """
+        Load completed request_ids from all JSONL files in the output directory.
+
+        Scans the output directory recursively and loads request_ids from
+        all .jsonl files. Handles the distributed file structure properly.
+
+        Returns:
+            Set of base request_id strings (without _rollout_N suffix)
+        """
+        completed_ids = set()
+
+        # Check if output directory exists
+        if not self.output_dir.exists():
+            logger.info(f"Output directory {self.output_dir} does not exist, starting fresh")
+            return completed_ids
+
+        logger.info(f"Loading completed request_ids from {self.output_dir}")
+
+        try:
+            # Find all .jsonl files in the output directory
+            jsonl_files = list(self.output_dir.rglob('*.jsonl'))
+
+            if not jsonl_files:
+                logger.info(f"No .jsonl files found in {self.output_dir}")
+                return completed_ids
+
+            for jsonl_file in jsonl_files:
+                logger.debug(f"Scanning {jsonl_file}")
+                try:
+                    with open(jsonl_file, 'r', encoding='utf-8') as f:
+                        for line_num, line in enumerate(f, 1):
+                            if not line.strip():
+                                continue
+
+                            try:
+                                data = json.loads(line)
+                                if 'request_id' in data:
+                                    # Strip rollout suffix to get base ID
+                                    base_id = data['request_id'].split('_rollout_')[0]
+                                    completed_ids.add(base_id)
+                            except json.JSONDecodeError as e:
+                                logger.warning(f"Skipping invalid JSON in {jsonl_file}:{line_num}: {e}")
+                                continue
+
+                except Exception as e:
+                    logger.warning(f"Error reading {jsonl_file}: {e}")
+                    continue
+
+            logger.info(f"Loaded {len(completed_ids)} completed request_ids from {len(jsonl_files)} files")
+
+        except Exception as e:
+            logger.error(f"Error loading completed IDs: {e}")
+
+        return completed_ids

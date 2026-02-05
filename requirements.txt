@@ -5,3 +5,7 @@ httpx[http2]>=0.24.0
 
 # Optional dependencies for specific loaders/savers
 pandas>=2.0.0
+
+# Optional dependency for high-performance hash-based ID generation
+# Recommended for large-scale batch processing (100M+ samples)
+xxhash>=3.0.0

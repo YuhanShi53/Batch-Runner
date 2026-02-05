@@ -99,6 +99,7 @@ def _validate_config(config: Dict[str, Any]):
         'success_rate_threshold': 0.5,
         'success_rate_window': 10,
         'max_active_requests': 50,
+        'resume': True,  # Enable resuming from existing output (default: True)
     }
 
     for key, value in runner_defaults.items():

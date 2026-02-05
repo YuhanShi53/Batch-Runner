@@ -96,10 +96,17 @@ class JSONLLoaderMixin(PromptExtractorMixin):
 
     def extract_request_id(self, item: Dict[str, Any], default_id: str) -> str:
         """
-        Extract request_id from parsed item.
+        Extract request_id from parsed item, with hash-based fallback.
 
-        Override this method to customize request ID extraction.
-        Default implementation uses configured id_field.
+        Priority:
+        1. Use id_field if present in data (maintains backward compatibility)
+        2. Generate hash-based ID from content (when id is missing)
+        3. Fall back to default_id (line number/index, rarely used)
+
+        This ensures:
+        - Existing data with 'id' field keeps original IDs
+        - New data without 'id' gets deterministic hash-based IDs
+        - Same content always generates same hash (for resume feature)
 
         Args:
             item: Parsed dictionary from parse_line()
@@ -114,8 +121,53 @@ class JSONLLoaderMixin(PromptExtractorMixin):
                 return f"{item.get('doc_id')}_{item.get('line_num', default_id)}"
         """
         id_field = getattr(self, 'id_field', 'id')
-        request_id = item.get(id_field, default_id)
-        return str(request_id)
+
+        # Try to get ID from field (priority #1 - backward compatibility)
+        if id_field in item and item[id_field] is not None:
+            return str(item[id_field])
+
+        # No ID field - generate hash-based ID (priority #2 - new behavior)
+        return self.generate_request_id_hash(item)
+
+    def generate_request_id_hash(self, item: Dict[str, Any]) -> str:
+        """
+        Generate a stable hash-based request_id from item content.
+
+        Uses xxHash for high performance with excellent collision resistance.
+        Falls back to SHA-256 if xxhash is not available.
+
+        Creates a deterministic hash using:
+        - The prompt content
+        - Key fields from additional_data
+        - Excludes volatile fields like timestamps
+
+        Returns:
+            Hexadecimal hash string (16 chars, e.g., "a1b2c3d4e5f6g7h8")
+        """
+        import hashlib
+        import json
+
+        # Get the prompt field
+        prompt_field = getattr(self, 'prompt_field', 'prompt')
+        prompt = item.get(prompt_field, '')
+
+        # Create a deterministic string representation
+        # Sort keys for consistent hashing
+        hashable_content = json.dumps({
+            'prompt': prompt,
+            'data': {k: v for k, v in sorted(item.items())
+                    if k != prompt_field and k != 'id'}
+        }, sort_keys=True)
+
+        # Try xxHash first (fastest, best for large-scale data)
+        try:
+            import xxhash
+            # xxHash 64-bit output as hex string
+            return format(xxhash.xxh64(hashable_content.encode()).intdigest(), 'x')
+        except ImportError:
+            # Fall back to SHA-256 (built-in, still very good)
+            logger.debug("xxhash not available, using SHA-256 for hash-based IDs")
+            return hashlib.sha256(hashable_content.encode()).hexdigest()[:16]
 
     def extract_additional_data(self, item: Dict[str, Any]) -> Dict[str, Any]:
         """

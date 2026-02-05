@@ -4,11 +4,15 @@ JSON file result saver implementation.
 Saves inference results to a JSON file with batch writing support.
 """
 import json
+import logging
 from typing import Dict, Any
 from pathlib import Path
 
 from .base import ResultSaver, SaveResult
 from .streaming_mixin import BatchWriterMixin, OutputFormatterMixin
+
+
+logger = logging.getLogger(__name__)
 
 
 class JSONResultSaver(BatchWriterMixin, OutputFormatterMixin, ResultSaver):
@@ -95,3 +99,35 @@ class JSONResultSaver(BatchWriterMixin, OutputFormatterMixin, ResultSaver):
     def cleanup(self):
         """Flush any remaining results and close file."""
         self._flush_batch()
+
+    def _load_completed_ids(self) -> set:
+        """
+        Load completed request_ids from existing JSON output file.
+
+        Returns:
+            Set of base request_id strings
+        """
+        completed_ids = set()
+
+        if not self.output_path.exists():
+            logger.info(f"Output file {self.output_path} does not exist, starting fresh")
+            return completed_ids
+
+        logger.info(f"Loading completed request_ids from {self.output_path}")
+
+        try:
+            with open(self.output_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+
+            if isinstance(data, list):
+                for item in data:
+                    if 'request_id' in item:
+                        base_id = item['request_id'].split('_rollout_')[0]
+                        completed_ids.add(base_id)
+
+            logger.info(f"Loaded {len(completed_ids)} completed request_ids")
+
+        except Exception as e:
+            logger.error(f"Error loading completed IDs: {e}")
+
+        return completed_ids

@@ -76,6 +76,9 @@ class BatchConfig:
     streaming: bool = True
     stream_queue_size: int = 100  # Max items in buffer queue for backpressure
 
+    # Resume settings
+    resume: bool = True  # Enable resuming from existing output
+
     def get(self, key: str, default=None):
         """Get config value with default fallback."""
         return getattr(self, key, default)
@@ -229,7 +232,27 @@ class BatchRunner:
     def _run_batch(self):
         """Original batch mode: load all data first, then process."""
         # Load all data into queue
+        all_items = []
         for item in self.loader:
+            all_items.append(item)
+
+        total_items = len(all_items)
+        self.logger.info(f"Loaded {total_items} items")
+
+        # Filter out completed requests if resume is enabled
+        if self.config.resume:
+            original_count = len(all_items)
+            all_items = [
+                item for item in all_items
+                if not self.saver.is_completed(item.request_id)
+            ]
+            skipped_count = original_count - len(all_items)
+            if skipped_count > 0:
+                self.logger.info(f"Resume: skipping {skipped_count} already completed requests")
+                self.logger.info(f"Resume: {len(all_items)} requests remaining to process")
+
+        # Create rollouts for remaining items
+        for item in all_items:
             for rollout_idx in range(self.config.num_rollouts):
                 rollout_result = LoadResult(
                     messages=item.messages,
@@ -273,7 +296,15 @@ class BatchRunner:
         def producer():
             """Producer thread: stream data from loader into queue."""
             try:
+                skipped_count = 0
                 for item in self.loader:
+                    # Skip if already completed (resume mode)
+                    if self.config.resume and self.saver.is_completed(item.request_id):
+                        skipped_count += 1
+                        if skipped_count == 1:
+                            self.logger.info(f"Resume mode: skipping already completed requests")
+                        continue
+
                     # Create rollouts
                     for rollout_idx in range(self.config.num_rollouts):
                         rollout_result = LoadResult(
@@ -285,6 +316,10 @@ class BatchRunner:
                         # Block if queue is full (backpressure)
                         request_queue.put(rollout_result)
                         total_requests[0] += 1
+
+                # Log skip statistics at end
+                if skipped_count > 0:
+                    self.logger.info(f"Resume: skipped {skipped_count} already completed requests")
 
                 self.logger.info(f"Producer finished: {total_requests[0]} requests queued")
             except Exception as e:
