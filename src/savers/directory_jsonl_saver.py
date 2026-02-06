@@ -46,7 +46,7 @@ class DirectoryJSONLResultSaver(StreamingSaverMixin, JSONLSaverMixin, ResultSave
     def _initialize(self):
         """Initialize directory JSONL saver."""
         self.output_dir = Path(self.config['output_dir'])
-        self.output_file_pattern = self.config.get('output_file_pattern', 'result.jsonl')
+        self.output_file_pattern = self.config.get('output_file_pattern', None)
         self.preserve_structure = self.config.get('preserve_structure', True)
         self.output_filename = self.config.get('output_filename', None)
 
@@ -79,9 +79,11 @@ class DirectoryJSONLResultSaver(StreamingSaverMixin, JSONLSaverMixin, ResultSave
             # Custom filename with optional {source} placeholder
             source_name = Path(source_file).stem  # filename without extension
             output_filename = self.output_filename.format(source=source_name)
-        else:
+        elif self.output_file_pattern:
             # Use default pattern
             output_filename = self.output_file_pattern
+        else:
+            output_filename = source_file
 
         # Mirror the directory structure
         if source_dir:
