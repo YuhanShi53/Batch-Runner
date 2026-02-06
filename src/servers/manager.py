@@ -340,5 +340,6 @@ class VLLMServerManager:
     def shutdown(self):
         """Stop health checker and cleanup resources."""
         self._stop_health_check.set()
-        if self._health_check_thread:
-            self._health_check_thread.join(timeout=5)
+        if self._health_check_thread and self._health_check_thread.is_alive():
+            # Wait for thread to finish (may be in middle of HTTP request)
+            self._health_check_thread.join(timeout=10)

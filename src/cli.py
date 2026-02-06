@@ -177,13 +177,18 @@ def main():
     except KeyboardInterrupt:
         logger.info("\nBatch inference interrupted by user")
         saver.cleanup()
+        logging.shutdown()
         sys.exit(1)
     except Exception as e:
         logger.error(f"Error during batch inference: {e}")
         import traceback
         traceback.print_exc()
         saver.cleanup()
+        logging.shutdown()
         sys.exit(1)
+
+    # Cleanup logging on successful completion
+    logging.shutdown()
 
 
 if __name__ == '__main__':
