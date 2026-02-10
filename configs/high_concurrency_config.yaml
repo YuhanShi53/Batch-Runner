@@ -25,9 +25,9 @@ runner:
   retry_delay: 0.5  # Quick retry
   request_timeout: 300  # 5 minutes - may need longer with high concurrency
 
-  # HTTP client settings (NEW - for connection pooling)
-  http_max_connections: 256  # Per-thread connections (4096 / 16 threads ~= 256)
-  http_max_keepalive_connections: 50  # Keep ~20% as keepalive
+  # HTTP client settings (shared async client)
+  http_max_connections: 4096  # Total concurrent connections (shared across all requests)
+  http_max_keepalive_connections: 1000  # Keep 1000 connections alive for reuse
   http2: true  # Enable HTTP/2 for better performance
 
   # Rollouts (number of times to run each sample)

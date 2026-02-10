@@ -103,7 +103,12 @@ class VLLMServer:
             # Apply penalty for low success rate
             # If success rate is 50%, effective load doubles
             # If success rate is 25%, effective load quadruples
-            success_rate = self.success_rate
+            total = self.success_count + self.error_count
+            if total == 0:
+                success_rate = 1.0
+            else:
+                success_rate = self.success_count / total
+
             if success_rate < 1.0:
                 penalty_factor = 1.0 / max(success_rate, 0.1)  # Cap at 10x penalty
                 return int(base_load * penalty_factor)

@@ -122,16 +122,16 @@ runner:
 
 #### `http_max_connections`
 - **Purpose**: Maximum concurrent connections per worker thread
-- **Formula**: `max_concurrency / num_threads`
-- **Example**: 4096 / 16 threads = 256
-- **Too low**: Requests will queue waiting for connections
-- **Too high**: Wastes memory and file descriptors
+- **Formula**: Each thread handles 1 request at a time, so `1-2` is sufficient
+- **Example**: With `max_concurrency: 4096`, you have 4096 threads, each needs 1-2 connections
+- **Too low**: May cause connection starvation if retries are needed
+- **Too high**: Wastes memory and file descriptors (4096 threads × high limit = system FD exhaustion)
 
 #### `http_max_keepalive_connections`
-- **Purpose**: Maximum idle connections to keep open
-- **Formula**: ~20% of `http_max_connections`
-- **Example**: 256 * 0.2 = 51.2 → 50
-- **Benefit**: Reuses TCP connections, avoids TLS handshakes
+- **Purpose**: Maximum idle connections to keep open per thread
+- **Formula**: `1` is sufficient for single-request-per-thread workloads
+- **Example**: 1 keepalive per thread = 4096 total keepalive connections
+- **Benefit**: Reuses TCP connections to the same server, avoids TLS handshakes
 
 #### `max_active_requests`
 - **Purpose**: Per-server concurrent request limit

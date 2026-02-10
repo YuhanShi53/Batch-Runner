@@ -4,107 +4,16 @@ Batch runner module - main orchestrator for batch inference.
 Coordinates data loading, server management, request processing, and result saving.
 """
 import time
-import threading
 import asyncio
-from typing import Dict, Any, Optional, List
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Dict, Any, Optional, TYPE_CHECKING
 from dataclasses import dataclass, field
-from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 import logging
-import queue
-
-try:
-    import requests
-except ImportError:
-    requests = None
 
 try:
     import httpx
 except ImportError:
     httpx = None
-
-
-# Thread-local storage for async event loops and HTTP clients
-_thread_local = threading.local()
-
-
-class AsyncClientContext:
-    """
-    Manages a persistent async event loop and httpx client per thread.
-
-    This ensures that each worker thread has its own long-lived event loop
-    and HTTP client, avoiding the overhead of creating new ones for each request.
-    """
-
-    def __init__(self, max_connections: int = 100, max_keepalive_connections: int = 20,
-                 timeout: int = 120, http2: bool = True):
-        """
-        Initialize the async client context.
-
-        Args:
-            max_connections: Maximum number of concurrent connections
-            max_keepalive_connections: Maximum number of keepalive connections
-            timeout: Request timeout in seconds
-            http2: Enable HTTP/2 support
-        """
-        self.max_connections = max_connections
-        self.max_keepalive_connections = max_keepalive_connections
-        self.timeout = timeout
-        self.http2 = http2
-        self._loop = None
-        self._client = None
-        self._lock = threading.Lock()
-
-    def _get_or_create_loop(self):
-        """Get or create event loop for this thread."""
-        if self._loop is None or self._loop.is_closed():
-            with self._lock:
-                if self._loop is None or self._loop.is_closed():
-                    self._loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(self._loop)
-        return self._loop
-
-    def _get_or_create_client(self):
-        """Get or create httpx client for this thread."""
-        if self._client is None or self._client.is_closed:
-            with self._lock:
-                if self._client is None or self._client.is_closed:
-                    limits = httpx.Limits(
-                        max_connections=self.max_connections,
-                        max_keepalive_connections=self.max_keepalive_connections
-                    )
-                    self._client = httpx.AsyncClient(
-                        limits=limits,
-                        timeout=self.timeout,
-                        http2=self.http2
-                    )
-        return self._client
-
-    def run_coroutine(self, coro):
-        """
-        Run a coroutine in this thread's event loop.
-
-        Args:
-            coro: Coroutine to run
-
-        Returns:
-            Result of the coroutine
-        """
-        loop = self._get_or_create_loop()
-        return loop.run_until_complete(coro)
-
-    def close(self):
-        """Close the HTTP client and event loop."""
-        with self._lock:
-            if self._client is not None and not self._client.is_closed:
-                # Need to run close in the event loop
-                if self._loop and not self._loop.is_closed():
-                    self._loop.run_until_complete(self._client.aclose())
-                self._client = None
-
-            if self._loop is not None and not self._loop.is_closed():
-                self._loop.close()
-                self._loop = None
 
 from .loaders.base import DataLoader, LoadResult
 from .savers.base import ResultSaver, SaveResult
@@ -125,8 +34,8 @@ class BatchConfig:
     request_timeout: int = 120
 
     # HTTP client settings
-    http_max_connections: int = 100  # Maximum concurrent connections per thread
-    http_max_keepalive_connections: int = 20  # Maximum keepalive connections per thread
+    http_max_connections: int = 4096  # Maximum concurrent connections (shared)
+    http_max_keepalive_connections: int = 1000  # Maximum keepalive connections (shared)
     http2: bool = True  # Enable HTTP/2
 
     # Rollout settings
@@ -182,7 +91,8 @@ class BatchStats:
     total_tokens: int = 0
     start_time: float = field(default_factory=time.time)
     end_time: Optional[float] = None
-    _lock: threading.Lock = field(default_factory=threading.Lock)
+    # Remove lock for better performance - accept small race conditions
+    # For monitoring purposes, 100% accuracy is not critical
 
     @property
     def duration(self) -> float:
@@ -198,35 +108,48 @@ class BatchStats:
             return 0.0
         return self.completed_requests / self.total_requests
 
-    def increment_completed(self):
+    async def increment_completed(self):
         """Increment completed requests count."""
-        with self._lock:
-            self.completed_requests += 1
+        self.completed_requests += 1
 
-    def increment_failed(self):
+    async def increment_failed(self):
         """Increment failed requests count."""
-        with self._lock:
-            self.failed_requests += 1
+        self.failed_requests += 1
 
-    def increment_retried(self):
+    async def increment_retried(self):
         """Increment retried requests count."""
-        with self._lock:
-            self.retried_requests += 1
+        self.retried_requests += 1
 
-    def add_tokens(self, count: int):
+    async def add_tokens(self, count: int):
         """Add to total tokens count."""
-        with self._lock:
-            self.total_tokens += count
+        self.total_tokens += count
+
+    # Keep sync versions for compatibility
+    def increment_completed_sync(self):
+        """Increment completed requests count (sync version)."""
+        self.completed_requests += 1
+
+    def increment_failed_sync(self):
+        """Increment failed requests count (sync version)."""
+        self.failed_requests += 1
+
+    def increment_retried_sync(self):
+        """Increment retried requests count (sync version)."""
+        self.retried_requests += 1
+
+    def add_tokens_sync(self, count: int):
+        """Add to total tokens count (sync version)."""
+        self.total_tokens += count
 
 
 class BatchRunner:
     """
-    Main batch inference runner.
+    Main batch inference runner with async support.
 
     Orchestrates:
     - Data loading
     - Server management and load balancing
-    - Concurrent request processing
+    - Concurrent request processing (async)
     - Result saving
     - Progress tracking and reporting
 
@@ -252,6 +175,12 @@ class BatchRunner:
         self.logger = logging.getLogger(__name__)
         self.stats = BatchStats()
 
+        # Shared async HTTP client
+        self._http_client = None
+
+        # Thread pool for blocking I/O operations (saver, logging)
+        self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="saver_")
+
         # Initialize server manager and load balancer
         server_config = {
             'servers_dir': config.servers_dir,
@@ -264,7 +193,6 @@ class BatchRunner:
         # Register callback to update load balancer when server health changes
         def on_server_state_change(_server, _is_healthy):
             """Callback when server health state changes."""
-            # Update the load balancer with the latest server list
             self.load_balancer.update_servers(self.server_manager.get_all_servers())
 
         self.server_manager.register_state_change_callback(on_server_state_change)
@@ -287,47 +215,41 @@ class BatchRunner:
         self.progress_tracker = ProgressTracker(
             total_items=self._estimate_total_items(),
             report_interval=config.progress_report_interval,
-            stats=self.stats  # Pass stats for detailed reporting
+            stats=self.stats
         )
 
-        # Request queue (list for non-streaming, queue.Queue for streaming)
-        self._request_queue: Optional[queue.Queue] = None
-        self._request_list: List[LoadResult] = []  # For non-streaming mode
-        self._lock = threading.Lock()
-
-        # Track worker threads for cleanup
-        self._worker_threads: List[threading.Thread] = []
-
-    def _get_async_client_context(self) -> AsyncClientContext:
+    async def _get_http_client(self):
         """
-        Get or create the async client context for the current thread.
-
-        Each worker thread gets its own context with a persistent event loop
-        and HTTP client to avoid overhead.
+        Get or create shared async HTTP client.
 
         Returns:
-            AsyncClientContext for the current thread
+            httpx.AsyncClient instance
         """
-        if not hasattr(_thread_local, 'async_context'):
-            _thread_local.async_context = AsyncClientContext(
+        if self._http_client is None or self._http_client.is_closed:
+            limits = httpx.Limits(
                 max_connections=self.config.http_max_connections,
-                max_keepalive_connections=self.config.http_max_keepalive_connections,
+                max_keepalive_connections=self.config.http_max_keepalive_connections
+            )
+            self._http_client = httpx.AsyncClient(
+                limits=limits,
                 timeout=self.config.request_timeout,
                 http2=self.config.http2
             )
-            self.logger.debug(
-                f"Created new AsyncClientContext for thread {threading.current_thread().name} "
-                f"(max_connections={self.config.http_max_connections}, "
+            self.logger.info(
+                f"Created shared AsyncClient (max_connections={self.config.http_max_connections}, "
                 f"max_keepalive={self.config.http_max_keepalive_connections})"
             )
-        return _thread_local.async_context
+        return self._http_client
 
-    def _cleanup_async_contexts(self):
-        """Clean up all async contexts for worker threads."""
-        self.logger.info("Cleaning up async client contexts...")
-        # Note: We can't directly access other threads' _thread_local storage,
-        # but the contexts will be garbage collected when threads exit.
-        # This is just a placeholder for any future cleanup logic.
+    async def close(self):
+        """Clean up resources."""
+        if self._http_client and not self._http_client.is_closed:
+            await self._http_client.aclose()
+            self.logger.info("Closed shared HTTP client")
+
+        # Shutdown thread pool
+        self._executor.shutdown(wait=True)
+        self.logger.info("Shutdown saver thread pool")
 
     def _estimate_total_items(self) -> int:
         """Estimate total number of requests to process."""
@@ -338,22 +260,34 @@ class BatchRunner:
             return 0
 
     def run(self):
-        """Execute the batch inference process."""
-        self.logger.info(f"Starting batch inference with {self.config.max_concurrency} workers")
+        """
+        Execute the batch inference process (sync wrapper for async).
+
+        This method is kept for backward compatibility.
+        """
+        asyncio.run(self.run_async())
+
+    async def run_async(self):
+        """Execute the batch inference process with async."""
+        self.logger.info(f"Starting batch inference with {self.config.max_concurrency} concurrent requests")
         self.logger.info(f"Rollouts per sample: {self.config.num_rollouts}")
         self.logger.info(f"Healthy servers: {self.server_manager.get_server_count()}")
 
         streaming_mode = self.config.get('streaming', True)
-        if streaming_mode:
-            self.logger.info("Running in STREAMING mode (pipeline processing)")
-            self._run_streaming()
-        else:
-            self.logger.info("Running in BATCH mode (pre-load all data)")
-            self._run_batch()
+        try:
+            if streaming_mode:
+                self.logger.info("Running in STREAMING mode (async pipeline processing)")
+                await self._run_streaming_async()
+            else:
+                self.logger.info("Running in BATCH mode (async processing)")
+                await self._run_batch_async()
+        finally:
+            await self.close()
+            self._finalize_stats()
 
-    def _run_batch(self):
-        """Original batch mode: load all data first, then process."""
-        # Load all data into queue
+    async def _run_batch_async(self):
+        """Batch mode: load all data first, then process with async."""
+        # Load all data into list
         all_items = []
         for item in self.loader:
             all_items.append(item)
@@ -374,6 +308,7 @@ class BatchRunner:
                 self.logger.info(f"Resume: {len(all_items)} requests remaining to process")
 
         # Create rollouts for remaining items
+        requests = []
         for item in all_items:
             for _ in range(self.config.num_rollouts):
                 rollout_result = LoadResult(
@@ -381,42 +316,35 @@ class BatchRunner:
                     request_id=item.request_id,
                     additional_data=item.additional_data
                 )
-                self._request_list.append(rollout_result)
+                requests.append(rollout_result)
 
-        total_requests = len(self._request_list)
+        total_requests = len(requests)
         self.stats.total_requests = total_requests
         self.logger.info(f"Total requests to process: {total_requests}")
 
-        # Process with thread pool
-        with ThreadPoolExecutor(max_workers=self.config.max_concurrency) as executor:
-            futures = {
-                executor.submit(self._process_request, request): request
-                for request in self._request_list
-            }
+        # Get shared client
+        client = await self._get_http_client()
 
-            for future in as_completed(futures):
-                try:
-                    future.result()
-                except Exception as e:
-                    self.logger.error(f"Request processing failed: {e}")
-                    self.stats.increment_failed()
+        # Process all requests concurrently
+        tasks = [
+            self._process_request_async(req, client)
+            for req in requests
+        ]
+        await asyncio.gather(*tasks, return_exceptions=True)
 
         # Finalize
-        self._finalize_batch(total_requests)
+        await self._finalize_batch_async(total_requests)
 
-    def _run_streaming(self):
+    async def _run_streaming_async(self):
         """Streaming mode: producer-consumer pipeline with bounded queue."""
         queue_size = self.config.get('stream_queue_size', 100)
-        request_queue: queue.Queue = queue.Queue(maxsize=queue_size)
-
-        # Producer thread: loads data from loader
-        # Consumer threads: ThreadPoolExecutor processes requests
+        request_queue: asyncio.Queue = asyncio.Queue(maxsize=queue_size)
 
         producer_exception = []
-        total_requests = [0]  # Use list for mutability in nested function
+        total_requests = [0]
 
-        def producer():
-            """Producer thread: stream data from loader into queue."""
+        async def producer():
+            """Producer coroutine: stream data from loader into queue."""
             try:
                 skipped_count = 0
                 for item in self.loader:
@@ -424,7 +352,7 @@ class BatchRunner:
                     if self.config.resume and self.saver.is_completed(item.request_id):
                         skipped_count += 1
                         if skipped_count == 1:
-                            self.logger.info(f"Resume mode: skipping already completed requests")
+                            self.logger.info("Resume mode: skipping already completed requests")
                         continue
 
                     # Create rollouts
@@ -434,9 +362,8 @@ class BatchRunner:
                             request_id=item.request_id,
                             additional_data=item.additional_data
                         )
-
                         # Block if queue is full (backpressure)
-                        request_queue.put(rollout_result)
+                        await request_queue.put(rollout_result)
                         total_requests[0] += 1
 
                 # Log skip statistics at end
@@ -445,67 +372,50 @@ class BatchRunner:
 
                 self.logger.info(f"Producer finished: {total_requests[0]} requests queued")
             except Exception as e:
-                self.logger.error(f"Producer thread error: {e}")
+                self.logger.error(f"Producer error: {e}")
                 producer_exception.append(e)
             finally:
                 # Signal end of data
-                request_queue.put(None)  # Sentinel value
+                await request_queue.put(None)  # Sentinel value
 
-        # Start producer thread
-        producer_thread = threading.Thread(target=producer, daemon=True)
-        producer_thread.start()
-
-        # Initialize stats for checkpoint
-        self.stats.total_requests = 0  # Will be updated as we consume
-        processed_count = 0
-
-        # Consumer: process requests with thread pool
-        with ThreadPoolExecutor(max_workers=self.config.max_concurrency) as executor:
-            futures = []
-
+        async def consumer():
+            """Consumer coroutine: process requests from queue."""
+            client = await self._get_http_client()
             while True:
-                # Get next request (blocks with timeout)
-                try:
-                    request = request_queue.get(timeout=1.0)
-                except queue.Empty:
-                    # Check if producer is still alive
-                    if producer_exception:
-                        raise producer_exception[0]
-                    if producer_thread.is_alive():
-                        continue
-                    # Producer finished but queue might still have items
-                    try:
-                        request = request_queue.get_nowait()
-                    except queue.Empty:
-                        break
+                # Get next request (may block)
+                request = await request_queue.get()
 
                 # Check for sentinel (end of stream)
                 if request is None:
+                    # Re-put sentinel for other consumers
+                    await request_queue.put(None)
                     break
 
-                # Submit for processing
-                future = executor.submit(self._process_request, request)
-                futures.append(future)
-                processed_count += 1
-
-                # Update progress periodically
-                if processed_count % 100 == 0:
-                    self.logger.debug(f"Queued {processed_count} requests for processing...")
-
-                # Clean up completed futures to prevent memory buildup
-                futures = [f for f in futures if not f.done()]
-
-            # Wait for all remaining futures
-            self.logger.info(f"Waiting for {len(futures)} remaining requests to complete...")
-            for future in as_completed(futures):
+                # Process request
                 try:
-                    future.result()
+                    await self._process_request_async(request, client)
                 except Exception as e:
                     self.logger.error(f"Request processing failed: {e}")
-                    self.stats.increment_failed()
+                    await self.stats.increment_failed()
+                finally:
+                    request_queue.task_done()
+
+        # Start producer and consumers
+        producer_task = asyncio.create_task(producer())
+
+        # Create consumer tasks
+        consumers = []
+        for _ in range(self.config.max_concurrency):
+            consumer_task = asyncio.create_task(consumer())
+            consumers.append(consumer_task)
 
         # Wait for producer to finish
-        producer_thread.join(timeout=5.0)
+        await producer_task
+
+        # Wait for all consumers to finish
+        await asyncio.gather(*consumers, return_exceptions=True)
+
+        # Check for producer exception
         if producer_exception:
             raise producer_exception[0]
 
@@ -513,30 +423,30 @@ class BatchRunner:
         self.stats.total_requests = total_requests[0]
 
         # Finalize
-        self._finalize_batch(total_requests[0])
+        await self._finalize_batch_async(total_requests[0])
 
-    def _finalize_batch(self, total_requests: int):
+    async def _finalize_batch_async(self, total_requests):
         """Common finalization logic for both batch and streaming modes."""
         self.stats.end_time = time.time()
-
-        # Clean up async contexts
-        self._cleanup_async_contexts()
 
         self.saver.cleanup()
         self.progress_tracker.finalize()
         self.server_manager.shutdown()
         self._print_summary()
 
-    def _process_request(self, request: LoadResult):
+    async def _process_request_async(self, request: LoadResult, client):
         """
-        Process a single inference request.
+        Process a single inference request asynchronously.
 
         Args:
             request: LoadResult containing messages and metadata
+            client: Shared httpx.AsyncClient
         """
         server = self.load_balancer.get_server()
         if not server:
-            raise RuntimeError("No healthy servers available")
+            self.logger.warning("No healthy servers available")
+            await self.stats.increment_failed()
+            return
 
         # Increment active request count for load balancing
         server.increment_active()
@@ -562,69 +472,14 @@ class BatchRunner:
                 presence_penalty=self.config.presence_penalty,
             )
 
-            # Send request with retry (tracks if retried)
-            was_retried, response = self._send_request_with_retry(server, payload)
+            # Send request async with retry
+            url = self.config.adapter.get_chat_url(server.base_url)
+            start_time = time.time()
 
-            # Parse response using adapter
-            model_output = self.config.adapter.parse_response(response) if response else {}
-
-            # Save result
-            save_result = SaveResult(
-                request_id=request.request_id,
-                model_output=model_output,
-                additional_data=request.additional_data
-            )
-            self.saver.save(save_result)
-
-            # Update statistics
-            self.stats.increment_completed()
-            tokens = model_output.get('usage', {}).get('total_tokens', 0)
-            self.stats.add_tokens(tokens)
-
-            # Record successful request on server
-            server.record_success()
-
-            # Update progress
-            self.progress_tracker.update(1)
-
-        except Exception as e:
-            # Record failed request on server
-            server.record_error()
-            self.logger.error(
-                f"Request {request.request_id} failed on server {server.name}: {e}"
-            )
-            raise
-
-    def _send_request_with_retry(self, server, payload: dict):
-        """
-        Send request to server with retry logic (uses persistent async HTTP client).
-
-        Args:
-            server: VLLMServer instance
-            payload: Request payload
-
-        Returns:
-            Tuple of (was_retried: bool, response: dict)
-        """
-        was_retried = False
-        start_time = time.time()
-
-        url = self.config.adapter.get_chat_url(server.base_url)
-        self.logger.debug(f"Sending async request to {url}")
-
-        try:
-            # Get the persistent async client context for this thread
-            context = self._get_async_client_context()
-
-            # Send request using the persistent client
-            response = context.run_coroutine(
-                _send_http_request_with_client(
-                    client=context._get_or_create_client(),
-                    url=url,
-                    payload=payload,
-                    max_retries=self.config.max_retries,
-                    base_delay=self.config.retry_delay
-                )
+            response = await self._send_request_async(
+                client=client,
+                url=url,
+                payload=payload
             )
 
             # Log timing for performance monitoring
@@ -634,17 +489,77 @@ class BatchRunner:
                     f"Request to {server.name} took {elapsed:.2f}s (slow, may indicate server congestion)"
                 )
 
-            was_retried = False
-            return (was_retried, response)
+            # Parse response using adapter
+            model_output = self.config.adapter.parse_response(response) if response else {}
+
+            # Save result (run in thread pool to avoid blocking event loop)
+            save_result = SaveResult(
+                request_id=request.request_id,
+                model_output=model_output,
+                additional_data=request.additional_data
+            )
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(self._executor, self.saver.save, save_result)
+
+            # Update statistics
+            await self.stats.increment_completed()
+            tokens = model_output.get('usage', {}).get('total_tokens', 0)
+            await self.stats.add_tokens(tokens)
+
+            # Record successful request on server
+            server.record_success()
+
+            # Update progress (run in thread pool to avoid blocking)
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(self._executor, self.progress_tracker.update, 1)
 
         except Exception as e:
-            was_retried = True
-            self.stats.increment_retried()
-            elapsed = time.time() - start_time
+            # Record failed request on server
+            server.record_error()
             self.logger.error(
-                f"Request to {server.name} failed after {elapsed:.2f}s: {e}"
+                f"Request {request.request_id} failed on server {server.name}: {e}"
             )
+            await self.stats.increment_failed()
             raise
+
+    async def _send_request_async(
+        self,
+        client,
+        url: str,
+        payload: dict
+    ):
+        """
+        Send async HTTP request with retry logic.
+
+        Args:
+            client: Shared httpx.AsyncClient
+            url: Request URL
+            payload: JSON payload
+
+        Returns:
+            Response JSON
+
+        Raises:
+            httpx.HTTPError: If all retries fail
+        """
+        for attempt in range(self.config.max_retries + 1):
+            try:
+                response = await client.post(url, json=payload)
+                response.raise_for_status()
+                return response.json()
+
+            except (httpx.TimeoutException, httpx.ConnectError, httpx.HTTPStatusError):
+                if attempt == self.config.max_retries:
+                    await self.stats.increment_retried()
+                    raise
+
+                delay = self.config.retry_delay * (2 ** attempt)
+                self.logger.debug(f"Request failed (attempt {attempt + 1}), retrying in {delay}s...")
+                await asyncio.sleep(delay)
+
+    def _finalize_stats(self):
+        """Finalize statistics."""
+        self.stats.end_time = time.time()
 
     def _print_summary(self):
         """Print processing summary."""
@@ -664,43 +579,3 @@ class BatchRunner:
         # Print server stats
         lb_stats = self.load_balancer.get_stats()
         self.logger.info(f"Server Stats: {lb_stats}")
-
-
-async def _send_http_request_with_client(
-    client: "httpx.AsyncClient",
-    url: str,
-    payload: dict,
-    max_retries: int = 3,
-    base_delay: float = 1.0
-) -> dict:
-    """
-    Send async HTTP request with retry logic using an existing client.
-
-    This function uses a persistent httpx.AsyncClient to avoid the overhead
-    of creating a new client for each request.
-
-    Args:
-        client: Existing httpx.AsyncClient instance
-        url: Request URL
-        payload: JSON payload
-        max_retries: Maximum retry attempts
-        base_delay: Base delay for exponential backoff
-
-    Returns:
-        Response JSON
-
-    Raises:
-        httpx.HTTPError: If all retries fail
-    """
-    for attempt in range(max_retries + 1):
-        try:
-            response = await client.post(url, json=payload)
-            response.raise_for_status()
-            return response.json()
-
-        except (httpx.TimeoutException, httpx.ConnectError, httpx.HTTPStatusError):
-            if attempt == max_retries:
-                raise
-
-            delay = base_delay * (2 ** attempt)
-            await asyncio.sleep(delay)

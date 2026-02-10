@@ -84,8 +84,8 @@ def _validate_config(config: Dict[str, Any]):
         'max_retries': 3,
         'retry_delay': 1.0,
         'request_timeout': 120,
-        'http_max_connections': 100,  # HTTP client max connections per thread
-        'http_max_keepalive_connections': 20,  # HTTP client keepalive connections per thread
+        'http_max_connections': 4096,  # HTTP client max connections (shared across all requests)
+        'http_max_keepalive_connections': 1000,  # HTTP client keepalive connections (shared)
         'http2': True,  # Enable HTTP/2
         'num_rollouts': 1,
         'model_name': 'default',

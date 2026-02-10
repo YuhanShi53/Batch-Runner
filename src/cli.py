@@ -173,6 +173,7 @@ def main():
     # Run batch inference
     try:
         runner = BatchRunner(batch_config, loader, saver)
+        # The run() method now wraps asyncio.run() internally
         runner.run()
     except KeyboardInterrupt:
         logger.info("\nBatch inference interrupted by user")
