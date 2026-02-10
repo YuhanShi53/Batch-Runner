@@ -253,10 +253,10 @@ class BatchRunner:
 
         # Create rollouts for remaining items
         for item in all_items:
-            for rollout_idx in range(self.config.num_rollouts):
+            for _ in range(self.config.num_rollouts):
                 rollout_result = LoadResult(
                     messages=item.messages,
-                    request_id=f"{item.request_id}_rollout_{rollout_idx}",
+                    request_id=item.request_id,
                     additional_data=item.additional_data
                 )
                 self._request_list.append(rollout_result)
@@ -306,10 +306,10 @@ class BatchRunner:
                         continue
 
                     # Create rollouts
-                    for rollout_idx in range(self.config.num_rollouts):
+                    for _ in range(self.config.num_rollouts):
                         rollout_result = LoadResult(
                             messages=item.messages,
-                            request_id=f"{item.request_id}_rollout_{rollout_idx}",
+                            request_id=item.request_id,
                             additional_data=item.additional_data
                         )
 

@@ -133,8 +133,7 @@ class JSONLLoaderMixin(PromptExtractorMixin):
         """
         Generate a stable hash-based request_id from item content.
 
-        Uses xxHash for high performance with excellent collision resistance.
-        Falls back to SHA-256 if xxhash is not available.
+        Uses SHA-256 for excellent collision resistance and deterministic output.
 
         Creates a deterministic hash using:
         - The prompt content
@@ -142,7 +141,7 @@ class JSONLLoaderMixin(PromptExtractorMixin):
         - Excludes volatile fields like timestamps
 
         Returns:
-            Hexadecimal hash string (16 chars, e.g., "a1b2c3d4e5f6g7h8")
+            Hexadecimal hash string (64 chars, e.g., full SHA-256 output)
         """
         import hashlib
         import json
@@ -159,15 +158,8 @@ class JSONLLoaderMixin(PromptExtractorMixin):
                     if k != prompt_field and k != 'id'}
         }, sort_keys=True)
 
-        # Try xxHash first (fastest, best for large-scale data)
-        try:
-            import xxhash
-            # xxHash 64-bit output as hex string
-            return format(xxhash.xxh64(hashable_content.encode()).intdigest(), 'x')
-        except ImportError:
-            # Fall back to SHA-256 (built-in, still very good)
-            logger.debug("xxhash not available, using SHA-256 for hash-based IDs")
-            return hashlib.sha256(hashable_content.encode()).hexdigest()[:16]
+        # Use SHA-256 for full 64-character hash
+        return hashlib.sha256(hashable_content.encode()).hexdigest()
 
     def extract_additional_data(self, item: Dict[str, Any]) -> Dict[str, Any]:
         """
