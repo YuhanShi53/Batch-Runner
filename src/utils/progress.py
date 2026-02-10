@@ -126,11 +126,19 @@ class ProgressTracker:
             failed = self.stats.failed_requests
             retried = self.stats.retried_requests
             tokens = self.stats.total_tokens
-            total = self.stats.total_requests
+            completed = self.stats.completed_requests
 
-            # Calculate success rate
+            # Calculate success rate based on actual results
+            # Success rate = (completed - failed) / completed, or just show completed/total if known
+            total = self.stats.total_requests
             if total > 0:
-                success_rate = (self.completed_items / total) * 100
+                # We know the total, use it
+                success_rate = (completed / total) * 100 if total > 0 else 0.0
+            elif completed > 0:
+                # In streaming mode, total may be 0 initially
+                # Calculate based on completed vs failed
+                success_count = completed - failed
+                success_rate = (success_count / completed) * 100 if completed > 0 else 0.0
             else:
                 success_rate = 0.0
 
