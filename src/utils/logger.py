@@ -95,3 +95,10 @@ def setup_logging_from_config(config: dict) -> None:
         file_handler = logging.FileHandler(log_path, encoding='utf-8')
         file_handler.setFormatter(formatter)
         root_logger.addHandler(file_handler)
+
+    # Configure httpx logging level
+    # Only show httpx logs in DEBUG mode, otherwise suppress them
+    if level.upper() == 'DEBUG':
+        logging.getLogger('httpx').setLevel(logging.DEBUG)
+    else:
+        logging.getLogger('httpx').setLevel(logging.WARNING)
