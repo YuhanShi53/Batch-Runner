@@ -484,10 +484,9 @@ class BatchRunner:
 
             # Log timing for performance monitoring
             elapsed = time.time() - start_time
-            if elapsed > 5.0:
-                self.logger.warning(
-                    f"Request to {server.name} took {elapsed:.2f}s (slow, may indicate server congestion)"
-                )
+            self.logger.debug(
+                f"Request to {server.name} took {elapsed:.2f}s (slow, may indicate server congestion)"
+            )
 
             # Parse response using adapter
             model_output = self.config.adapter.parse_response(response) if response else {}
