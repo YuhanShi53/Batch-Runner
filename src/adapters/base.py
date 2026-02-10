@@ -5,7 +5,6 @@ Provides abstract base class for model API adapters.
 """
 from abc import ABC, abstractmethod
 from typing import Dict, Any, List
-import requests
 
 
 class ModelAdapter(ABC):
@@ -23,7 +22,7 @@ class ModelAdapter(ABC):
         ...         return {"prompt": messages[0]["content"]}
         ...
         ...     def parse_response(self, response):
-        ...         return {"text": response.json()["output"]}
+        ...         return {"text": response["output"]}
     """
 
     @abstractmethod
@@ -51,12 +50,12 @@ class ModelAdapter(ABC):
         pass
 
     @abstractmethod
-    def parse_response(self, response: requests.Response) -> Dict[str, Any]:
+    def parse_response(self, response: Dict[str, Any]) -> Dict[str, Any]:
         """
         Parse API response to extract model output.
 
         Args:
-            response: HTTP response object
+            response: Response dict (already parsed from JSON)
 
         Returns:
             Standardized model output dict with keys:

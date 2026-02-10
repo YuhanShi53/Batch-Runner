@@ -4,7 +4,6 @@ Simple completion API adapter.
 For APIs that use simple prompt-to-completion format without message structure.
 """
 from typing import Dict, Any, List
-import requests
 
 from .base import ModelAdapter
 
@@ -51,7 +50,7 @@ class SimpleAdapter(ModelAdapter):
             "temperature": temperature,
         }
 
-    def parse_response(self, response: requests.Response) -> Dict[str, Any]:
+    def parse_response(self, response: Dict[str, Any]) -> Dict[str, Any]:
         """
         Parse simple response to OpenAI-compatible format.
 
@@ -59,8 +58,11 @@ class SimpleAdapter(ModelAdapter):
         {"text": "response", "tokens_used": 50}
         To:
         {"choices": [{"message": {"content": "response"}}], "usage": {"total_tokens": 50}}
+
+        Args:
+            response: Response dict (already parsed from JSON)
         """
-        data = response.json()
+        data = response
 
         # Extract text from common field names
         text = data.get("text") or data.get("completion") or data.get("output") or ""

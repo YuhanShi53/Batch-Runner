@@ -4,7 +4,6 @@ OpenAI-compatible API adapter.
 Handles standard OpenAI API format used by vLLM and many other providers.
 """
 from typing import Dict, Any, List
-import requests
 
 from .base import ModelAdapter
 
@@ -70,14 +69,14 @@ class OpenAIAdapter(ModelAdapter):
 
         return payload
 
-    def parse_response(self, response: requests.Response) -> Dict[str, Any]:
+    def parse_response(self, response: Dict[str, Any]) -> Dict[str, Any]:
         """
         Parse OpenAI-compatible response.
 
         Args:
-            response: HTTP response object
+            response: Response dict (already parsed from JSON)
 
         Returns:
             Standardized output dict matching OpenAI format
         """
-        return response.json()
+        return response
