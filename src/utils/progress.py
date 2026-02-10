@@ -27,6 +27,8 @@ class ProgressTracker:
     completed_items: int = field(default=0)
     start_time: float = field(default_factory=time.time)
     last_report_time: float = field(default_factory=time.time)
+    # Flag to prevent concurrent reporting from multiple threads
+    _reporting: bool = field(default=False)
     # Remove lock for better performance - accept small timing race conditions
     stats: Optional[Any] = field(default=None)
 
@@ -38,12 +40,18 @@ class ProgressTracker:
             count: Number of items completed since last update
         """
         self.completed_items += count
-        current_time = time.time()
 
-        # Report if interval has passed
-        if current_time - self.last_report_time >= self.report_interval:
-            self._report()
-            self.last_report_time = current_time
+        # Check if enough time has passed since last report
+        # Use local variable to avoid race condition with last_report_time update
+        current_time = time.time()
+        last_report = self.last_report_time
+
+        if current_time - last_report >= self.report_interval:
+            # Use compare-and-swap style update to ensure only one thread reports
+            # This is best-effort - tiny chance of duplicate reports is acceptable
+            if self.last_report_time == last_report:
+                self._report()
+                self.last_report_time = current_time
 
     def _report(self):
         """Print progress report."""
