@@ -656,6 +656,6 @@ class CustomLoader(JSONLLoaderMixin, MessagesBuilderMixin, DataLoader):
 - 📗 [重构总结](docs/REFACTORING_SUMMARY.md) - 最新重构的详细说明
 - 💡 [自定义组件示例](examples/custom_components.py) - 完整的代码示例
 
-## 许可证
+## TODO
 
-MIT License
+1. 批量指定 json/jsonl 文件，一个 yaml 配置即可
