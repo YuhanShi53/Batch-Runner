@@ -1,0 +1,84 @@
+# Example configuration for distributed/chunked processing
+# This configuration demonstrates how to split data processing across multiple machines
+# to reduce CPU load and improve throughput
+#
+# IMPORTANT: Use the SAME config file on all machines, just change chunk_index via CLI
+
+# === BASE CONFIGURATION (use on all machines) ===
+loader:
+  class: JSONLDataLoader
+  params:
+    file_path: data/prompts.jsonl
+    # Chunked processing config
+    num_chunks: 4        # Split data into 4 chunks
+    chunk_index: 0       # This machine processes chunk 0 (items 0, 4, 8, ...)
+
+    # Other standard params
+    prompt_field: prompt
+    id_field: id
+    streaming: true
+
+saver:
+  class: JSONLResultSaver
+  params:
+    output_path: results/output.jsonl  # Auto-appends _chunk_N suffix!
+    # Saver will automatically write to:
+    # - results/output_chunk_0.jsonl (when chunk_index=0)
+    # - results/output_chunk_1.jsonl (when chunk_index=1)
+    # - results/output_chunk_2.jsonl (when chunk_index=2)
+    # - results/output_chunk_3.jsonl (when chunk_index=3)
+
+runner:
+  model_name: meta-llama/Llama-3-8b
+  max_concurrency: 20
+  num_rollouts: 1
+  servers_dir: ./servers
+  load_balancing_strategy: round_robin
+
+  # Adapter settings
+  adapter_class: OpenAIAdapter
+  adapter_params:
+    api_key: "empty"
+
+  # Sampling parameters
+  temperature: 0.7
+  max_tokens: 1000
+
+  # Retry settings
+  max_retries: 3
+  retry_delay: 1.0
+  request_timeout: 120
+
+  # Streaming settings
+  streaming: true
+  stream_queue_size: 100
+
+logging:
+  level: INFO
+  file: logs/chunk_processing.log
+
+# === USAGE EXAMPLE ===
+#
+# Machine 1 (processes chunk 0):
+#   python -m src.cli --config configs/chunked_config_example.yaml --loader.chunk_index 0
+#
+# Machine 2 (processes chunk 1):
+#   python -m src.cli --config configs/chunked_config_example.yaml --loader.chunk_index 1 --saver.chunk_index 1
+#
+# Machine 3 (processes chunk 2):
+#   python -m src.cli --config configs/chunked_config_example.yaml --loader.chunk_index 2 --saver.chunk_index 2
+#
+# Machine 4 (processes chunk 3):
+#   python -m src.cli --config configs/chunked_config_example.yaml --loader.chunk_index 3 --saver.chunk_index 3
+#
+# NOTE: You must specify BOTH loader.chunk_index and saver.chunk_index via CLI
+#       to keep the output files separate and avoid conflicts.
+#
+# === MERGING RESULTS ===
+# After all machines complete, merge the chunked outputs:
+#
+#   cat results/output_chunk_*.jsonl > results/all_results.jsonl
+#
+# Or using JSON:
+#   python -c "import json; files=['results/output_chunk_0.jsonl','results/output_chunk_1.jsonl','results/output_chunk_2.jsonl','results/output_chunk_3.jsonl']; data=[]; [data.extend([json.loads(line) for line in open(f)]) for f in files]; json.dump(data, open('results/all_results.json', 'w'), indent=2)"
+

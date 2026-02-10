@@ -2,20 +2,21 @@
 JSON file result saver implementation.
 
 Saves inference results to a JSON file with batch writing support.
+Supports chunked output via ChunkedSaverMixin.
 """
 import json
 import logging
 from typing import Dict, Any
-from pathlib import Path
 
 from .base import ResultSaver, SaveResult
 from .streaming_mixin import BatchWriterMixin, OutputFormatterMixin
+from .chunked_mixin import ChunkedSaverMixin
 
 
 logger = logging.getLogger(__name__)
 
 
-class JSONResultSaver(BatchWriterMixin, OutputFormatterMixin, ResultSaver):
+class JSONResultSaver(ChunkedSaverMixin, BatchWriterMixin, OutputFormatterMixin, ResultSaver):
     """
     Save inference results to a JSON file.
 
@@ -25,6 +26,13 @@ class JSONResultSaver(BatchWriterMixin, OutputFormatterMixin, ResultSaver):
         output_path: Path to output JSON file
         batch_size: Number of results to buffer before writing (default: 100)
         pretty_print: Whether to format JSON with indentation (default: true)
+        num_chunks: Total number of chunks (default: 1)
+        chunk_index: Which chunk to process (0-indexed, default: 0)
+        add_chunk_suffix: Auto-add chunk suffix to output path (default: true)
+
+    Chunked Output:
+        When num_chunks > 1, automatically appends _chunk_{index} to output filename.
+        Example: output_path: results/data.json -> results/data_chunk_0.json
 
     Customization:
         Override methods from OutputFormatterMixin to customize output:
@@ -35,7 +43,12 @@ class JSONResultSaver(BatchWriterMixin, OutputFormatterMixin, ResultSaver):
 
     def _initialize(self):
         """Initialize JSON file saver."""
-        self.output_path = Path(self.config['output_path'])
+        # Initialize chunking from ChunkedSaverMixin
+        self._initialize_chunking()
+
+        # Get output path with chunk suffix automatically applied
+        self.output_path = self._get_chunked_output_path()
+
         self.pretty = self.config.get('pretty_print', True)
 
         # Create output directory if needed

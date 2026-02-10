@@ -4,6 +4,7 @@ JSON file data loader implementation.
 Loads inference requests from a JSON file.
 
 Supports both text-only and multimodal (text + images) data.
+Supports chunked/distributed processing via ChunkedLoaderMixin.
 """
 import json
 from typing import Iterator, Dict, Any, Optional, List
@@ -12,12 +13,13 @@ import logging
 
 from .base import DataLoader, LoadResult
 from .multimodal_base import MultimodalDataLoader, MultimodalLoadResult
+from .chunked_mixin import ChunkedLoaderMixin
 
 
 logger = logging.getLogger(__name__)
 
 
-class JSONDataLoader(DataLoader):
+class JSONDataLoader(ChunkedLoaderMixin, DataLoader):
     """
     Load inference requests from a JSON file (text-only mode).
 
@@ -32,6 +34,27 @@ class JSONDataLoader(DataLoader):
         batch_size: Number of items to load at once (default: 1)
         prompt_field: Field name containing the prompt (default: "prompt")
         id_field: Field name containing the ID (default: "id")
+
+    Chunked Processing (for distributed execution):
+        num_chunks: Total number of chunks to split data into (default: 1)
+        chunk_index: Which chunk to process, 0-indexed (default: 0)
+
+    Example for distributed processing:
+        # Machine 1 processes first 25% of data
+        loader:
+            class: JSONDataLoader
+            params:
+                file_path: data.json
+                num_chunks: 4
+                chunk_index: 0
+
+        # Machine 2 processes second 25%
+        loader:
+            class: JSONDataLoader
+            params:
+                file_path: data.json
+                num_chunks: 4
+                chunk_index: 1
     """
 
     def _initialize(self):
@@ -39,6 +62,9 @@ class JSONDataLoader(DataLoader):
         self.file_path = Path(self.config['file_path'])
         self.prompt_field = self.config.get('prompt_field', 'prompt')
         self.id_field = self.config.get('id_field', 'id')
+
+        # Initialize chunking from ChunkedLoaderMixin
+        self._initialize_chunking()
 
         if not self.file_path.exists():
             raise FileNotFoundError(f"JSON file not found: {self.file_path}")
@@ -49,10 +75,21 @@ class JSONDataLoader(DataLoader):
         if not isinstance(self.data, list):
             raise ValueError("JSON root must be a list of objects")
 
+        if self.num_chunks > 1:
+            estimated = self._estimate_chunk_size(len(self.data))
+            logger.info(
+                f"Dataset has {len(self.data)} total items, "
+                f"this chunk will process ~{estimated} items"
+            )
+
     def load(self) -> Iterator[LoadResult]:
         """Yield LoadResult objects from JSON data."""
-        for idx, item in enumerate(self.data, 1):
+        for idx, item in enumerate(self.data):
             try:
+                # Check if this item belongs to the current chunk
+                if not self._should_process_item(idx):
+                    continue
+
                 prompt = item.get(self.prompt_field)
                 request_id = item.get(
                     self.id_field, f"req_{id(item)}"
@@ -82,7 +119,7 @@ class JSONDataLoader(DataLoader):
         return len(self.data)
 
 
-class MultimodalJSONDataLoader(MultimodalDataLoader):
+class MultimodalJSONDataLoader(ChunkedLoaderMixin, MultimodalDataLoader):
     """
     Load multimodal inference requests from a JSON file.
 
@@ -103,6 +140,8 @@ class MultimodalJSONDataLoader(MultimodalDataLoader):
         images_field: Field name for multiple images (default: "images")
         image_base_dir: Base directory for relative image paths (default: "")
         encode_images: Whether to encode images to base64 (default: True)
+        num_chunks: Total number of chunks (default: 1)
+        chunk_index: Which chunk to process, 0-indexed (default: 0)
 
     Image field precedence:
     - If 'image' field exists: use it (single image)
@@ -112,13 +151,16 @@ class MultimodalJSONDataLoader(MultimodalDataLoader):
 
     def _initialize(self):
         """Initialize multimodal JSON file loader."""
-        super()._initialize()
+        MultimodalDataLoader._initialize(self)
 
         self.file_path = Path(self.config['file_path'])
         self.prompt_field = self.config.get('prompt_field', 'prompt')
         self.id_field = self.config.get('id_field', 'id')
         self.image_field = self.config.get('image_field', 'image')
         self.images_field = self.config.get('images_field', 'images')
+
+        # Initialize chunking from ChunkedLoaderMixin
+        self._initialize_chunking()
 
         if not self.file_path.exists():
             raise FileNotFoundError(f"JSON file not found: {self.file_path}")
@@ -128,6 +170,13 @@ class MultimodalJSONDataLoader(MultimodalDataLoader):
 
         if not isinstance(self.data, list):
             raise ValueError("JSON root must be a list of objects")
+
+        if self.num_chunks > 1:
+            estimated = self._estimate_chunk_size(len(self.data))
+            logger.info(
+                f"Dataset has {len(self.data)} total items, "
+                f"this chunk will process ~{estimated} items"
+            )
 
     def _extract_images(self, item: Dict[str, Any]) -> Optional[List[str]]:
         """
@@ -165,8 +214,12 @@ class MultimodalJSONDataLoader(MultimodalDataLoader):
 
     def load(self) -> Iterator[MultimodalLoadResult]:
         """Yield MultimodalLoadResult objects from JSON data."""
-        for idx, item in enumerate(self.data, 1):
+        for idx, item in enumerate(self.data):
             try:
+                # Check if this item belongs to the current chunk
+                if not self._should_process_item(idx):
+                    continue
+
                 prompt = item.get(self.prompt_field)
                 request_id = item.get(self.id_field, f"req_{id(item)}")
 

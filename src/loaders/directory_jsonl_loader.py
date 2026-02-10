@@ -5,6 +5,7 @@ Recursively loads conv.jsonl files from a directory tree.
 Preserves directory structure information for each loaded item.
 
 Supports both text-only and multimodal (text + images) data.
+Supports chunked/distributed processing via ChunkedLoaderMixin.
 """
 import json
 from typing import Iterator, Dict, Any, Optional, List, Tuple
@@ -15,12 +16,13 @@ from .base import DataLoader, LoadResult
 from .jsonl_mixin import JSONLLoaderMixin
 from .streaming_mixin import StreamingLoaderMixin, MessagesBuilderMixin
 from .multimodal_base import MultimodalDataLoader, MultimodalLoadResult
+from .chunked_mixin import ChunkedLoaderMixin
 
 
 logger = logging.getLogger(__name__)
 
 
-class DirectoryJSONLDataLoader(StreamingLoaderMixin, MessagesBuilderMixin, JSONLLoaderMixin, DataLoader):
+class DirectoryJSONLDataLoader(ChunkedLoaderMixin, StreamingLoaderMixin, MessagesBuilderMixin, JSONLLoaderMixin, DataLoader):
     """
     Load inference requests from conv.jsonl files in a directory tree (text-only mode).
 
@@ -39,6 +41,8 @@ class DirectoryJSONLDataLoader(StreamingLoaderMixin, MessagesBuilderMixin, JSONL
         id_field: Field name containing the ID (default: "id")
         recursive: Whether to search subdirectories (default: true)
         streaming: Enable streaming mode (default: True for efficiency)
+        num_chunks: Total number of chunks (default: 1)
+        chunk_index: Which chunk to process, 0-indexed (default: 0)
 
     Additional data included for each item:
         _source_file: Relative path from input_dir to the source conv.jsonl file
@@ -55,6 +59,9 @@ class DirectoryJSONLDataLoader(StreamingLoaderMixin, MessagesBuilderMixin, JSONL
 
         # Initialize streaming configuration from StreamingLoaderMixin
         self._initialize_streaming()
+
+        # Initialize chunking from ChunkedLoaderMixin
+        self._initialize_chunking()
 
         if not self.input_dir.exists():
             raise FileNotFoundError(f"Input directory not found: {self.input_dir}")
@@ -105,6 +112,13 @@ class DirectoryJSONLDataLoader(StreamingLoaderMixin, MessagesBuilderMixin, JSONL
                 raise ValueError(f"No valid JSON objects found in {self.input_dir}")
 
             logger.info(f"Loaded {len(self.data)} items from {len(self.files)} files into memory")
+
+            if self.num_chunks > 1:
+                estimated = self._estimate_chunk_size(len(self.data))
+                logger.info(
+                    f"Dataset has {len(self.data)} total items, "
+                    f"this chunk will process ~{estimated} items"
+                )
 
     def _discover_sources(self) -> List[Tuple[Path, Path, Path]]:
         """
@@ -181,12 +195,16 @@ class DirectoryJSONLDataLoader(StreamingLoaderMixin, MessagesBuilderMixin, JSONL
     def load(self) -> Iterator[LoadResult]:
         """Yield LoadResult objects from directory JSONL data."""
         if self.streaming:
-            # Use StreamingLoaderMixin template method
-            yield from self._stream_load()
+            # Use chunked streaming template method
+            yield from self._chunked_stream_load()
         else:
             # Batch mode: iterate over pre-loaded data
-            for idx, item in enumerate(self.data, 1):
+            for idx, item in enumerate(self.data):
                 try:
+                    # Check if this item belongs to the current chunk
+                    if not self._should_process_item(idx):
+                        continue
+
                     prompt = self.extract_prompt(item)
                     if prompt is None:
                         logger.debug(
@@ -211,6 +229,101 @@ class DirectoryJSONLDataLoader(StreamingLoaderMixin, MessagesBuilderMixin, JSONL
                     )
                     continue
 
+    def _chunked_stream_load(self) -> Iterator[LoadResult]:
+        """
+        Streaming template method with chunking support.
+
+        This overrides the default StreamingLoaderMixin._stream_load to
+        add global item indexing for chunked processing across multiple files.
+        """
+        sources = self._discover_sources()
+        logger.info(f"Streaming mode: discovered {len(sources)} sources")
+
+        if self.num_chunks > 1:
+            logger.info(
+                f"Chunked streaming: processing chunk {self.chunk_index + 1}/"
+                f"{self.num_chunks} (approximately {100.0 / self.num_chunks:.1f}% of data)"
+            )
+
+        global_idx = 0
+        for source in sources:
+            # Check if we should skip this source
+            if self._should_skip_source(source):
+                logger.debug(f"Skipping source: {source}")
+                continue
+
+            # Call pre-processing hook
+            self._on_source_start(source)
+
+            item_count = 0
+            try:
+                # Process this source
+                for result in self._process_source_with_index(source, global_idx):
+                    item_count += 1
+                    global_idx += 1
+                    yield result
+
+                # Call post-processing hook
+                self._on_source_complete(source, item_count)
+
+            except Exception as e:
+                # Call error handling hook
+                self._on_source_error(source, e)
+
+    def _process_source_with_index(
+        self, source: Tuple[Path, Path, Path], start_global_idx: int
+    ) -> Iterator[LoadResult]:
+        """
+        Process a single JSONL file with global indexing for chunking.
+
+        Args:
+            source: Tuple of (file_path, rel_path, rel_dir)
+            start_global_idx: Starting global index for this file
+
+        Yields:
+            LoadResult objects from the file
+        """
+        file_path, rel_path, rel_dir = source
+
+        with open(file_path, 'r', encoding='utf-8') as f:
+            for line_idx, line in enumerate(f):
+                line = line.strip()
+                if not line:
+                    continue
+
+                # Calculate global index for this line
+                global_idx = start_global_idx + line_idx
+
+                # Check if this line belongs to the current chunk
+                if not self._should_process_item(global_idx):
+                    continue
+
+                line_num = line_idx + 1  # 1-indexed for error messages
+                try:
+                    # Use the mixin's process_line_to_load_result template method
+                    result = self.process_line_to_load_result(
+                        line=line,
+                        line_num=line_num,
+                        source=str(rel_path),
+                        default_id=f"{rel_path}:{line_num}"
+                    )
+
+                    if result is None:
+                        # Line was skipped by the mixin
+                        continue
+
+                    # Add source information to additional_data
+                    if result.additional_data is None:
+                        result.additional_data = {}
+                    result.additional_data['_source_file'] = str(rel_path)
+                    result.additional_data['_source_dir'] = str(rel_dir) if rel_dir != Path('.') else ''
+
+                    yield result
+
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Invalid JSON in {rel_path}:{line_num}: {e}")
+                    continue
+
     def __len__(self):
         if not self.streaming:
             return len(self.data)
@@ -218,7 +331,7 @@ class DirectoryJSONLDataLoader(StreamingLoaderMixin, MessagesBuilderMixin, JSONL
         raise NotImplementedError("Cannot get length in streaming mode")
 
 
-class MultimodalDirectoryJSONLDataLoader(StreamingLoaderMixin, JSONLLoaderMixin, MultimodalDataLoader):
+class MultimodalDirectoryJSONLDataLoader(ChunkedLoaderMixin, StreamingLoaderMixin, JSONLLoaderMixin, MultimodalDataLoader):
     """
     Load multimodal inference requests from conv.jsonl files in a directory tree.
 
@@ -250,6 +363,8 @@ class MultimodalDirectoryJSONLDataLoader(StreamingLoaderMixin, JSONLLoaderMixin,
                       If not specified, images are resolved relative to each conv.jsonl file's directory
         encode_images: Whether to encode images to base64 (default: True)
         recursive: Whether to search subdirectories (default: true)
+        num_chunks: Total number of chunks (default: 1)
+        chunk_index: Which chunk to process, 0-indexed (default: 0)
 
     Image resolution:
     - If image_base_dir is specified: relative paths are resolved from image_base_dir
@@ -282,6 +397,9 @@ class MultimodalDirectoryJSONLDataLoader(StreamingLoaderMixin, JSONLLoaderMixin,
 
         # Initialize streaming configuration from StreamingLoaderMixin
         self._initialize_streaming()
+
+        # Initialize chunking from ChunkedLoaderMixin
+        self._initialize_chunking()
 
         # If image_base_dir is not specified, we'll use the directory of each conv.jsonl file
         self.use_source_dir_as_base = not self.config.get('image_base_dir', '')
@@ -337,6 +455,13 @@ class MultimodalDirectoryJSONLDataLoader(StreamingLoaderMixin, JSONLLoaderMixin,
                 raise ValueError(f"No valid JSON objects found in {self.input_dir}")
 
             logger.info(f"Loaded {len(self.data)} items from {len(self.files)} files into memory")
+
+            if self.num_chunks > 1:
+                estimated = self._estimate_chunk_size(len(self.data))
+                logger.info(
+                    f"Dataset has {len(self.data)} total items, "
+                    f"this chunk will process ~{estimated} items"
+                )
 
     def _discover_sources(self) -> List[Tuple[Path, Path, Path, Path]]:
         """
@@ -502,12 +627,16 @@ class MultimodalDirectoryJSONLDataLoader(StreamingLoaderMixin, JSONLLoaderMixin,
     def load(self) -> Iterator[MultimodalLoadResult]:
         """Yield MultimodalLoadResult objects from directory JSONL data."""
         if self.streaming:
-            # Use StreamingLoaderMixin template method
-            yield from self._stream_load()
+            # Use chunked streaming template method
+            yield from self._chunked_stream_load_multimodal()
         else:
             # Batch mode: iterate over pre-loaded data
-            for idx, item in enumerate(self.data, 1):
+            for idx, item in enumerate(self.data):
                 try:
+                    # Check if this item belongs to the current chunk
+                    if not self._should_process_item(idx):
+                        continue
+
                     prompt = self.extract_prompt(item)
                     if prompt is None:
                         logger.debug(
@@ -531,6 +660,109 @@ class MultimodalDirectoryJSONLDataLoader(StreamingLoaderMixin, JSONLLoaderMixin,
                     logger.error(
                         f"Unexpected error processing item at index {idx}: {e}"
                     )
+                    continue
+
+    def _chunked_stream_load_multimodal(self) -> Iterator[MultimodalLoadResult]:
+        """
+        Streaming template method with chunking support for multimodal data.
+
+        This overrides the default StreamingLoaderMixin._stream_load to
+        add global item indexing for chunked processing across multiple files.
+        """
+        sources = self._discover_sources()
+        logger.info(f"Streaming mode: discovered {len(sources)} sources")
+
+        if self.num_chunks > 1:
+            logger.info(
+                f"Chunked streaming: processing chunk {self.chunk_index + 1}/"
+                f"{self.num_chunks} (approximately {100.0 / self.num_chunks:.1f}% of data)"
+            )
+
+        global_idx = 0
+        for source in sources:
+            # Check if we should skip this source
+            if self._should_skip_source(source):
+                logger.debug(f"Skipping source: {source}")
+                continue
+
+            # Call pre-processing hook
+            self._on_source_start(source)
+
+            item_count = 0
+            try:
+                # Process this source
+                for result in self._process_source_multimodal_with_index(source, global_idx):
+                    item_count += 1
+                    global_idx += 1
+                    yield result
+
+                # Call post-processing hook
+                self._on_source_complete(source, item_count)
+
+            except Exception as e:
+                # Call error handling hook
+                self._on_source_error(source, e)
+
+    def _process_source_multimodal_with_index(
+        self, source: Tuple[Path, Path, Path, Path], start_global_idx: int
+    ) -> Iterator[MultimodalLoadResult]:
+        """
+        Process a single JSONL file with global indexing for chunking (multimodal).
+
+        Args:
+            source: Tuple of (file_path, rel_path, rel_dir, source_dir)
+            start_global_idx: Starting global index for this file
+
+        Yields:
+            MultimodalLoadResult objects from the file
+        """
+        file_path, rel_path, rel_dir, source_dir = source
+
+        with open(file_path, 'r', encoding='utf-8') as f:
+            for line_idx, line in enumerate(f):
+                line = line.strip()
+                if not line:
+                    continue
+
+                # Calculate global index for this line
+                global_idx = start_global_idx + line_idx
+
+                # Check if this line belongs to the current chunk
+                if not self._should_process_item(global_idx):
+                    continue
+
+                line_num = line_idx + 1  # 1-indexed for error messages
+                try:
+                    # Use the mixin's parse_line method for extensibility
+                    obj = self.parse_line(line, line_num, str(rel_path))
+                    if obj is None:
+                        # Line was skipped by the mixin
+                        continue
+
+                    # Add source information
+                    obj['_source_file'] = str(rel_path)
+                    obj['_source_dir'] = str(rel_dir) if rel_dir != Path('.') else ''
+                    obj['_source_dir_path'] = str(source_dir)
+
+                    prompt = self.extract_prompt(obj)
+                    if prompt is None:
+                        logger.debug(f"Skipping item {rel_path}:{line_num}: no '{self.prompt_field}' field")
+                        continue
+
+                    request_id = self.extract_request_id(obj, f"{rel_path}:{line_num}")
+                    images = self.extract_images(obj)
+
+                    # Extract additional data with proper field exclusion
+                    additional_data = self._extract_additional_data_multimodal(obj)
+
+                    yield self._create_multimodal_result(
+                        text=prompt,
+                        images=images,
+                        request_id=str(request_id),
+                        additional_data=additional_data or None
+                    )
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Invalid JSON in {rel_path}:{line_num}: {e}")
                     continue
 
     def _extract_additional_data_multimodal(self, item: Dict[str, Any]) -> Dict[str, Any]:

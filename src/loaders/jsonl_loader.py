@@ -6,6 +6,7 @@ Each line is a separate JSON object representing one data sample.
 
 Supports both text-only and multimodal (text + images) data.
 Supports both streaming and batch modes.
+Supports chunked/distributed processing via ChunkedLoaderMixin.
 """
 import json
 from typing import Iterator, Dict, Any, Optional, List
@@ -16,12 +17,13 @@ from .base import DataLoader, LoadResult
 from .jsonl_mixin import JSONLLoaderMixin
 from .streaming_mixin import StreamingLoaderMixin, MessagesBuilderMixin
 from .multimodal_base import MultimodalDataLoader, MultimodalLoadResult
+from .chunked_mixin import ChunkedLoaderMixin
 
 
 logger = logging.getLogger(__name__)
 
 
-class JSONLDataLoader(StreamingLoaderMixin, MessagesBuilderMixin, JSONLLoaderMixin, DataLoader):
+class JSONLDataLoader(ChunkedLoaderMixin, StreamingLoaderMixin, MessagesBuilderMixin, JSONLLoaderMixin, DataLoader):
     """
     Load inference requests from a JSONL file (text-only mode).
 
@@ -35,6 +37,8 @@ class JSONLDataLoader(StreamingLoaderMixin, MessagesBuilderMixin, JSONLLoaderMix
         prompt_field: Field name containing the prompt (default: "prompt")
         id_field: Field name containing the ID (default: "id")
         streaming: Enable streaming mode (default: True for efficiency)
+        num_chunks: Total number of chunks (default: 1)
+        chunk_index: Which chunk to process, 0-indexed (default: 0)
 
     Customization:
         Override methods from JSONLLoaderMixin to customize parsing:
@@ -64,6 +68,9 @@ class JSONLDataLoader(StreamingLoaderMixin, MessagesBuilderMixin, JSONLLoaderMix
         # Initialize streaming configuration from StreamingLoaderMixin
         self._initialize_streaming()
 
+        # Initialize chunking from ChunkedLoaderMixin
+        self._initialize_chunking()
+
         if not self.file_path.exists():
             raise FileNotFoundError(f"JSONL file not found: {self.file_path}")
 
@@ -90,6 +97,13 @@ class JSONLDataLoader(StreamingLoaderMixin, MessagesBuilderMixin, JSONLLoaderMix
 
             logger.info(f"Loaded {len(self.data)} items into memory")
 
+            if self.num_chunks > 1:
+                estimated = self._estimate_chunk_size(len(self.data))
+                logger.info(
+                    f"Dataset has {len(self.data)} total items, "
+                    f"this chunk will process ~{estimated} items"
+                )
+
     def _discover_sources(self) -> List[Any]:
         """Return the single JSONL file as the data source."""
         return [self.file_path]
@@ -105,11 +119,16 @@ class JSONLDataLoader(StreamingLoaderMixin, MessagesBuilderMixin, JSONLLoaderMix
             LoadResult objects from each line
         """
         with open(source, 'r', encoding='utf-8') as f:
-            for line_num, line in enumerate(f, 1):
+            for line_idx, line in enumerate(f):
                 line = line.strip()
                 if not line:
                     continue
 
+                # Check if this line belongs to the current chunk
+                if not self._should_process_item(line_idx):
+                    continue
+
+                line_num = line_idx + 1  # 1-indexed for error messages
                 result = self.process_line_to_load_result(
                     line=line,
                     line_num=line_num,
@@ -135,10 +154,14 @@ class JSONLDataLoader(StreamingLoaderMixin, MessagesBuilderMixin, JSONLLoaderMix
             yield from self._stream_load()
         else:
             # Batch mode: iterate over pre-loaded data
-            for idx, item in enumerate(self.data, 1):
+            for idx, item in enumerate(self.data):
                 try:
+                    # Check if this item belongs to the current chunk
+                    if not self._should_process_item(idx):
+                        continue
+
                     # Use the mixin's template method for processing
-                    default_id = f"req_{idx}"
+                    default_id = f"req_{idx + 1}"
                     prompt = self.extract_prompt(item)
 
                     if prompt is None:
@@ -167,7 +190,7 @@ class JSONLDataLoader(StreamingLoaderMixin, MessagesBuilderMixin, JSONLLoaderMix
         return len(self.data)
 
 
-class MultimodalJSONLDataLoader(StreamingLoaderMixin, JSONLLoaderMixin, MultimodalDataLoader):
+class MultimodalJSONLDataLoader(ChunkedLoaderMixin, StreamingLoaderMixin, JSONLLoaderMixin, MultimodalDataLoader):
     """
     Load multimodal inference requests from a JSONL file.
 
@@ -196,6 +219,8 @@ class MultimodalJSONLDataLoader(StreamingLoaderMixin, JSONLLoaderMixin, Multimod
         image_base_dir: Base directory for relative image paths (default: "")
         encode_images: Whether to encode images to base64 (default: True)
         streaming: Enable streaming mode (default: False for backwards compatibility)
+        num_chunks: Total number of chunks (default: 1)
+        chunk_index: Which chunk to process, 0-indexed (default: 0)
 
     Image field precedence:
     - If 'image' field exists: use it (single image)
@@ -233,6 +258,9 @@ class MultimodalJSONLDataLoader(StreamingLoaderMixin, JSONLLoaderMixin, Multimod
         # Default to False for backwards compatibility with existing behavior
         self._initialize_streaming()
 
+        # Initialize chunking from ChunkedLoaderMixin
+        self._initialize_chunking()
+
         if not self.file_path.exists():
             raise FileNotFoundError(f"JSONL file not found: {self.file_path}")
 
@@ -259,6 +287,13 @@ class MultimodalJSONLDataLoader(StreamingLoaderMixin, JSONLLoaderMixin, Multimod
 
             logger.info(f"Loaded {len(self.data)} items into memory")
 
+            if self.num_chunks > 1:
+                estimated = self._estimate_chunk_size(len(self.data))
+                logger.info(
+                    f"Dataset has {len(self.data)} total items, "
+                    f"this chunk will process ~{estimated} items"
+                )
+
     def _discover_sources(self) -> List[Any]:
         """Return the single JSONL file as the data source."""
         return [self.file_path]
@@ -274,10 +309,16 @@ class MultimodalJSONLDataLoader(StreamingLoaderMixin, JSONLLoaderMixin, Multimod
             MultimodalLoadResult objects from each line
         """
         with open(source, 'r', encoding='utf-8') as f:
-            for line_num, line in enumerate(f, 1):
+            for line_idx, line in enumerate(f):
                 line = line.strip()
                 if not line:
                     continue
+
+                # Check if this line belongs to the current chunk
+                if not self._should_process_item(line_idx):
+                    continue
+
+                line_num = line_idx + 1  # 1-indexed for error messages
 
                 # Parse the line
                 item = self.parse_line(line, line_num, str(source))
@@ -386,8 +427,12 @@ class MultimodalJSONLDataLoader(StreamingLoaderMixin, JSONLLoaderMixin, Multimod
             yield from self._stream_load()
         else:
             # Batch mode: iterate over pre-loaded data
-            for idx, item in enumerate(self.data, 1):
+            for idx, item in enumerate(self.data):
                 try:
+                    # Check if this item belongs to the current chunk
+                    if not self._should_process_item(idx):
+                        continue
+
                     # Use the mixin's extract_prompt method
                     prompt = self.extract_prompt(item)
                     if prompt is None:
@@ -397,7 +442,7 @@ class MultimodalJSONLDataLoader(StreamingLoaderMixin, JSONLLoaderMixin, Multimod
                         continue
 
                     # Use the mixin's extract_request_id method
-                    request_id = self.extract_request_id(item, f"req_{idx}")
+                    request_id = self.extract_request_id(item, f"req_{idx + 1}")
 
                     # Extract images using custom method
                     images = self.extract_images(item)

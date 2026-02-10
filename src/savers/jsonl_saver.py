@@ -4,19 +4,20 @@ JSONL file result saver implementation.
 Saves inference results to a JSONL file.
 Each result is written as a separate JSON object on its own line.
 Supports streaming mode with immediate write-back.
+Supports chunked output via ChunkedSaverMixin.
 """
 import threading
-from pathlib import Path
 import logging
 
 from .base import ResultSaver, SaveResult
 from .jsonl_mixin import JSONLSaverMixin
+from .chunked_mixin import ChunkedSaverMixin
 
 
 logger = logging.getLogger(__name__)
 
 
-class JSONLResultSaver(JSONLSaverMixin, ResultSaver):
+class JSONLResultSaver(ChunkedSaverMixin, JSONLSaverMixin, ResultSaver):
     """
     Save inference results to a JSONL file.
 
@@ -29,6 +30,14 @@ class JSONLResultSaver(JSONLSaverMixin, ResultSaver):
         append: Whether to append to existing file (default: true)
         streaming: Enable streaming mode (default: true)
         immediate_flush: Flush to disk after each write (default: true)
+        num_chunks: Total number of chunks (default: 1)
+        chunk_index: Which chunk to process (0-indexed, default: 0)
+        add_chunk_suffix: Auto-add chunk suffix to output path (default: true)
+
+    Chunked Output:
+        When num_chunks > 1, automatically appends _chunk_{index} to output filename.
+        Example: output_path: results/data.jsonl -> results/data_chunk_0.jsonl
+        This prevents file conflicts when running multiple distributed processes.
 
     Customization:
         Override methods from JSONLSaverMixin to customize output:
@@ -47,7 +56,12 @@ class JSONLResultSaver(JSONLSaverMixin, ResultSaver):
 
     def _initialize(self):
         """Initialize JSONL file saver."""
-        self.output_path = Path(self.config['output_path'])
+        # Initialize chunking from ChunkedSaverMixin
+        self._initialize_chunking()
+
+        # Get output path with chunk suffix automatically applied
+        self.output_path = self._get_chunked_output_path()
+
         self.append = self.config.get('append', True)
         self.streaming = self.config.get('streaming', True)
         self.immediate_flush = self.config.get('immediate_flush', True)
