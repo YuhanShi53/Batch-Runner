@@ -23,6 +23,89 @@ try:
 except ImportError:
     httpx = None
 
+
+# Thread-local storage for async event loops and HTTP clients
+_thread_local = threading.local()
+
+
+class AsyncClientContext:
+    """
+    Manages a persistent async event loop and httpx client per thread.
+
+    This ensures that each worker thread has its own long-lived event loop
+    and HTTP client, avoiding the overhead of creating new ones for each request.
+    """
+
+    def __init__(self, max_connections: int = 100, max_keepalive_connections: int = 20,
+                 timeout: int = 120, http2: bool = True):
+        """
+        Initialize the async client context.
+
+        Args:
+            max_connections: Maximum number of concurrent connections
+            max_keepalive_connections: Maximum number of keepalive connections
+            timeout: Request timeout in seconds
+            http2: Enable HTTP/2 support
+        """
+        self.max_connections = max_connections
+        self.max_keepalive_connections = max_keepalive_connections
+        self.timeout = timeout
+        self.http2 = http2
+        self._loop = None
+        self._client = None
+        self._lock = threading.Lock()
+
+    def _get_or_create_loop(self):
+        """Get or create event loop for this thread."""
+        if self._loop is None or self._loop.is_closed():
+            with self._lock:
+                if self._loop is None or self._loop.is_closed():
+                    self._loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(self._loop)
+        return self._loop
+
+    def _get_or_create_client(self):
+        """Get or create httpx client for this thread."""
+        if self._client is None or self._client.is_closed:
+            with self._lock:
+                if self._client is None or self._client.is_closed:
+                    limits = httpx.Limits(
+                        max_connections=self.max_connections,
+                        max_keepalive_connections=self.max_keepalive_connections
+                    )
+                    self._client = httpx.AsyncClient(
+                        limits=limits,
+                        timeout=self.timeout,
+                        http2=self.http2
+                    )
+        return self._client
+
+    def run_coroutine(self, coro):
+        """
+        Run a coroutine in this thread's event loop.
+
+        Args:
+            coro: Coroutine to run
+
+        Returns:
+            Result of the coroutine
+        """
+        loop = self._get_or_create_loop()
+        return loop.run_until_complete(coro)
+
+    def close(self):
+        """Close the HTTP client and event loop."""
+        with self._lock:
+            if self._client is not None and not self._client.is_closed:
+                # Need to run close in the event loop
+                if self._loop and not self._loop.is_closed():
+                    self._loop.run_until_complete(self._client.aclose())
+                self._client = None
+
+            if self._loop is not None and not self._loop.is_closed():
+                self._loop.close()
+                self._loop = None
+
 from .loaders.base import DataLoader, LoadResult
 from .savers.base import ResultSaver, SaveResult
 from .servers.manager import VLLMServerManager
@@ -40,6 +123,11 @@ class BatchConfig:
     max_retries: int = 3
     retry_delay: float = 1.0
     request_timeout: int = 120
+
+    # HTTP client settings
+    http_max_connections: int = 100  # Maximum concurrent connections per thread
+    http_max_keepalive_connections: int = 20  # Maximum keepalive connections per thread
+    http2: bool = True  # Enable HTTP/2
 
     # Rollout settings
     num_rollouts: int = 1
@@ -206,6 +294,40 @@ class BatchRunner:
         self._request_queue: Optional[queue.Queue] = None
         self._request_list: List[LoadResult] = []  # For non-streaming mode
         self._lock = threading.Lock()
+
+        # Track worker threads for cleanup
+        self._worker_threads: List[threading.Thread] = []
+
+    def _get_async_client_context(self) -> AsyncClientContext:
+        """
+        Get or create the async client context for the current thread.
+
+        Each worker thread gets its own context with a persistent event loop
+        and HTTP client to avoid overhead.
+
+        Returns:
+            AsyncClientContext for the current thread
+        """
+        if not hasattr(_thread_local, 'async_context'):
+            _thread_local.async_context = AsyncClientContext(
+                max_connections=self.config.http_max_connections,
+                max_keepalive_connections=self.config.http_max_keepalive_connections,
+                timeout=self.config.request_timeout,
+                http2=self.config.http2
+            )
+            self.logger.debug(
+                f"Created new AsyncClientContext for thread {threading.current_thread().name} "
+                f"(max_connections={self.config.http_max_connections}, "
+                f"max_keepalive={self.config.http_max_keepalive_connections})"
+            )
+        return _thread_local.async_context
+
+    def _cleanup_async_contexts(self):
+        """Clean up all async contexts for worker threads."""
+        self.logger.info("Cleaning up async client contexts...")
+        # Note: We can't directly access other threads' _thread_local storage,
+        # but the contexts will be garbage collected when threads exit.
+        # This is just a placeholder for any future cleanup logic.
 
     def _estimate_total_items(self) -> int:
         """Estimate total number of requests to process."""
@@ -396,6 +518,10 @@ class BatchRunner:
     def _finalize_batch(self, total_requests: int):
         """Common finalization logic for both batch and streaming modes."""
         self.stats.end_time = time.time()
+
+        # Clean up async contexts
+        self._cleanup_async_contexts()
+
         self.saver.cleanup()
         self.progress_tracker.finalize()
         self.server_manager.shutdown()
@@ -471,7 +597,7 @@ class BatchRunner:
 
     def _send_request_with_retry(self, server, payload: dict):
         """
-        Send request to server with retry logic (uses async HTTP internally).
+        Send request to server with retry logic (uses persistent async HTTP client).
 
         Args:
             server: VLLMServer instance
@@ -481,25 +607,43 @@ class BatchRunner:
             Tuple of (was_retried: bool, response: dict)
         """
         was_retried = False
+        start_time = time.time()
 
         url = self.config.adapter.get_chat_url(server.base_url)
         self.logger.debug(f"Sending async request to {url}")
 
         try:
-            # Run async HTTP request in current thread
-            response = asyncio.run(_send_http_request_async(
-                url=url,
-                payload=payload,
-                timeout=self.config.request_timeout,
-                max_retries=self.config.max_retries,
-                base_delay=self.config.retry_delay
-            ))
+            # Get the persistent async client context for this thread
+            context = self._get_async_client_context()
+
+            # Send request using the persistent client
+            response = context.run_coroutine(
+                _send_http_request_with_client(
+                    client=context._get_or_create_client(),
+                    url=url,
+                    payload=payload,
+                    max_retries=self.config.max_retries,
+                    base_delay=self.config.retry_delay
+                )
+            )
+
+            # Log timing for performance monitoring
+            elapsed = time.time() - start_time
+            if elapsed > 5.0:
+                self.logger.warning(
+                    f"Request to {server.name} took {elapsed:.2f}s (slow, may indicate server congestion)"
+                )
+
             was_retried = False
             return (was_retried, response)
 
         except Exception as e:
             was_retried = True
             self.stats.increment_retried()
+            elapsed = time.time() - start_time
+            self.logger.error(
+                f"Request to {server.name} failed after {elapsed:.2f}s: {e}"
+            )
             raise
 
     def _print_summary(self):
@@ -522,20 +666,23 @@ class BatchRunner:
         self.logger.info(f"Server Stats: {lb_stats}")
 
 
-async def _send_http_request_async(
+async def _send_http_request_with_client(
+    client: "httpx.AsyncClient",
     url: str,
     payload: dict,
-    timeout: int,
     max_retries: int = 3,
     base_delay: float = 1.0
 ) -> dict:
     """
-    Send async HTTP request with retry logic.
+    Send async HTTP request with retry logic using an existing client.
+
+    This function uses a persistent httpx.AsyncClient to avoid the overhead
+    of creating a new client for each request.
 
     Args:
+        client: Existing httpx.AsyncClient instance
         url: Request URL
         payload: JSON payload
-        timeout: Request timeout in seconds
         max_retries: Maximum retry attempts
         base_delay: Base delay for exponential backoff
 
@@ -545,29 +692,15 @@ async def _send_http_request_async(
     Raises:
         httpx.HTTPError: If all retries fail
     """
-    if httpx is None:
-        raise ImportError("httpx is required. Install it with: pip install 'httpx[http2]'")
+    for attempt in range(max_retries + 1):
+        try:
+            response = await client.post(url, json=payload)
+            response.raise_for_status()
+            return response.json()
 
-    # Create client with connection pooling
-    limits = httpx.Limits(
-        max_connections=10000,
-        max_keepalive_connections=1000
-    )
+        except (httpx.TimeoutException, httpx.ConnectError, httpx.HTTPStatusError):
+            if attempt == max_retries:
+                raise
 
-    async with httpx.AsyncClient(
-        limits=limits,
-        timeout=timeout,
-        http2=True
-    ) as client:
-        for attempt in range(max_retries + 1):
-            try:
-                response = await client.post(url, json=payload)
-                response.raise_for_status()
-                return response.json()
-
-            except (httpx.TimeoutException, httpx.ConnectError, httpx.HTTPStatusError) as e:
-                if attempt == max_retries:
-                    raise
-
-                delay = base_delay * (2 ** attempt)
-                await asyncio.sleep(delay)
+            delay = base_delay * (2 ** attempt)
+            await asyncio.sleep(delay)

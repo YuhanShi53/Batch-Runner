@@ -1,0 +1,74 @@
+# vLLM Batch Runner Configuration - High Concurrency (4096)
+# Optimized for 160 vLLM servers with high throughput
+
+# DataLoader Configuration
+loader:
+  class: DirectoryJSONLDataLoader  # Streaming loader for large datasets
+  params:
+    input_dir: data/input
+    prompt_field: prompt
+    id_field: id
+    streaming: true  # Enable streaming mode
+
+# ResultSaver Configuration
+saver:
+  class: DirectoryJSONLResultSaver  # Streaming saver with immediate writes
+  params:
+    output_dir: outputs/results
+    batch_size: 100  # Buffer size for batch writes
+
+# Batch Runner Configuration
+runner:
+  # Concurrency settings
+  max_concurrency: 4096  # Total concurrent requests
+  max_retries: 1  # Reduce retries to avoid cascading failures
+  retry_delay: 0.5  # Quick retry
+  request_timeout: 300  # 5 minutes - may need longer with high concurrency
+
+  # HTTP client settings (NEW - for connection pooling)
+  http_max_connections: 256  # Per-thread connections (4096 / 16 threads ~= 256)
+  http_max_keepalive_connections: 50  # Keep ~20% as keepalive
+  http2: true  # Enable HTTP/2 for better performance
+
+  # Rollouts (number of times to run each sample)
+  num_rollouts: 1
+
+  # Model parameters
+  model_name: meta-llama/Llama-2-7b-chat-hf
+  temperature: 0.7
+  max_tokens: 1000
+  system_prompt: ""
+  top_p: 1.0
+  frequency_penalty: 0.0
+  presence_penalty: 0.0
+
+  # Server configuration
+  servers_dir: ./vllm_servers
+  load_balancing_strategy: least_connections  # Best for distributing load across many servers
+  max_active_requests: 512  # Per-server limit (4096 / 160 servers = 26, set higher for headroom)
+
+  # Health check configuration
+  health_check_interval: 30
+  max_failures: 10  # More tolerant with high concurrency
+  allow_unhealthy_fallback: false
+
+  # Success rate tracking
+  success_rate_threshold: 0.3  # Lower threshold for high concurrency scenarios
+  success_rate_window: 20  # More samples before trusting success rate
+
+  # Streaming pipeline settings
+  streaming: true
+  stream_queue_size: 2048  # Larger queue for better throughput
+
+  # Model adapter configuration
+  adapter_class: OpenAIAdapter
+  adapter_params: {}
+
+  # Progress tracking
+  progress_report_interval: 5  # More frequent updates for long-running jobs
+
+# Logging Configuration
+logging:
+  level: INFO
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: logs/batch_runner.log
