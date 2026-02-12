@@ -35,9 +35,6 @@ runner:
   retry_delay: 2.0
   request_timeout: 180  # Vision models may need more time
 
-  # Rollouts (for consistency testing)
-  num_rollouts: 1
-
   # Server management
   servers_dir: ./servers
   load_balancing_strategy: round_robin  # Options: round_robin, least_connections, random

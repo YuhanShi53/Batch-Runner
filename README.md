@@ -10,7 +10,6 @@
 - **流式处理**: 支持流式数据加载和结果保存，内存占用恒定
 - **并发处理**: 多 vLLM 服务器间的高效负载均衡
 - **容错机制**: 指数退避的自动重试
-- **多次 Rollout**: 对每个样本运行多次以进行一致性分析
 - **配置驱动**: 基于 YAML 的全组件配置
 - **服务器发现**: 从目录结构自动发现 vLLM 服务器
 - **健康检查**: 自动服务器健康监控和动态故障转移
@@ -371,7 +370,6 @@ python -m src.cli --config configs/config.yaml [选项]
 选项:
   --config, -c       配置文件路径
   --concurrency      覆盖最大并发数
-  --rollouts         覆盖每个样本的 rollout 次数
   --model            覆盖模型名称
   --temperature      覆盖采样温度
   --max-tokens       覆盖最大生成 token 数
@@ -455,14 +453,6 @@ saver:
 
 runner:
   model_name: "laion/CLIP-ViT-H-14-laion2B-s32B-b79K"
-```
-
-### 多次 Rollout
-
-每个样本运行 3 次：
-
-```bash
-python -m src.cli --config configs/config.yaml --rollouts 3
 ```
 
 ### 高并发
@@ -567,7 +557,7 @@ vllm_runner/
 
 ### 5. BatchRunner ([`src/batch_runner.py`](src/batch_runner.py))
 主协调器，负责：
-- 加载数据并生成 rollout
+- 加载数据
 - 初始化服务器管理器和负载均衡器
 - 并发处理请求（支持流式模式）
 - 失败重试

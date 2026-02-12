@@ -27,9 +27,6 @@ Examples:
   # Run with custom concurrency
   python -m src.cli --config configs/config.yaml --concurrency 20
 
-  # Run multiple rollouts
-  python -m src.cli --config configs/config.yaml --rollouts 3
-
   # Override model parameters
   python -m src.cli --config configs/config.yaml --temperature 0.5 --max-tokens 2000
         """
@@ -46,12 +43,6 @@ Examples:
         '--concurrency',
         type=int,
         help='Override max concurrency'
-    )
-
-    parser.add_argument(
-        '--rollouts',
-        type=int,
-        help='Override number of rollouts per sample'
     )
 
     parser.add_argument(
@@ -104,8 +95,6 @@ def main():
     # Apply CLI overrides
     if args.concurrency:
         config['runner']['max_concurrency'] = args.concurrency
-    if args.rollouts:
-        config['runner']['num_rollouts'] = args.rollouts
     if args.model:
         config['runner']['model_name'] = args.model
     if args.temperature is not None:

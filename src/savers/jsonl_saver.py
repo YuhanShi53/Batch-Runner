@@ -107,7 +107,7 @@ class JSONLResultSaver(ChunkedSaverMixin, JSONLSaverMixin, ResultSaver):
         Handles corrupted lines gracefully by skipping them.
 
         Returns:
-            Set of base request_id strings (without _rollout_N suffix)
+            Set of request_id strings
         """
         import json
 
@@ -129,9 +129,7 @@ class JSONLResultSaver(ChunkedSaverMixin, JSONLSaverMixin, ResultSaver):
                     try:
                         data = json.loads(line)
                         if 'request_id' in data:
-                            # Strip rollout suffix to get base ID
-                            base_id = data['request_id'].split('_rollout_')[0]
-                            completed_ids.add(base_id)
+                            completed_ids.add(data['request_id'])
                     except json.JSONDecodeError as e:
                         logger.warning(f"Skipping invalid JSON at line {line_num}: {e}")
                         continue

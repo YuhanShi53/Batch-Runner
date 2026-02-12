@@ -24,9 +24,6 @@ runner:
   retry_delay: 1.0
   request_timeout: 120
 
-  # Rollouts (number of times to run each sample)
-  num_rollouts: 1
-
   # Model parameters
   model_name: meta-llama/Llama-2-7b-chat-hf
   temperature: 0.7

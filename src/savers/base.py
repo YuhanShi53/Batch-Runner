@@ -167,18 +167,16 @@ class ResultSaver(ABC):
         Override this method for custom behavior.
 
         Args:
-            request_id: The request ID to check (with or without _rollout_N suffix)
+            request_id: The request ID to check
 
         Returns:
-            True if the request_id (or its base ID for rollouts) is in output
+            True if the request_id is in output
         """
         # Lazy load completed IDs on first call
         if not hasattr(self, '_completed_ids'):
             self._completed_ids = self._load_completed_ids()
 
-        # Handle rollout IDs: strip _rollout_N suffix
-        base_id = request_id.split('_rollout_')[0]
-        return base_id in self._completed_ids
+        return request_id in self._completed_ids
 
     def _load_completed_ids(self) -> set:
         """
@@ -188,7 +186,7 @@ class ResultSaver(ABC):
         Default implementation returns empty set (no resume support).
 
         Returns:
-            Set of completed request_id strings (base IDs, without rollout suffix)
+            Set of completed request_id strings
         """
         return set()
 

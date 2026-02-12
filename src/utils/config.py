@@ -87,7 +87,6 @@ def _validate_config(config: Dict[str, Any]):
         'http_max_connections': 4096,  # HTTP client max connections (shared across all requests)
         'http_max_keepalive_connections': 1000,  # HTTP client keepalive connections (shared)
         'http2': True,  # Enable HTTP/2
-        'num_rollouts': 1,
         'model_name': 'default',
         'temperature': 0.7,
         'max_tokens': 1000,

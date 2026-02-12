@@ -18,7 +18,6 @@ saver:
 runner:
   max_concurrency: 10
   max_retries: 3
-  num_rollouts: 3  # Run each sample 3 times
   model_name: meta-llama/Llama-2-7b-chat-hf
   temperature: 0.8
   max_tokens: 2000

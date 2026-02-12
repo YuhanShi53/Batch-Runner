@@ -118,7 +118,7 @@ class JSONResultSaver(ChunkedSaverMixin, BatchWriterMixin, OutputFormatterMixin,
         Load completed request_ids from existing JSON output file.
 
         Returns:
-            Set of base request_id strings
+            Set of request_id strings
         """
         completed_ids = set()
 
@@ -135,8 +135,7 @@ class JSONResultSaver(ChunkedSaverMixin, BatchWriterMixin, OutputFormatterMixin,
             if isinstance(data, list):
                 for item in data:
                     if 'request_id' in item:
-                        base_id = item['request_id'].split('_rollout_')[0]
-                        completed_ids.add(base_id)
+                        completed_ids.add(item['request_id'])
 
             logger.info(f"Loaded {len(completed_ids)} completed request_ids")
 

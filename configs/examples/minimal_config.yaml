@@ -18,7 +18,6 @@ runner:
   max_concurrency: 5
   model_name: gpt-3.5-turbo
   servers_dir: ./vllm_servers
-  num_rollouts: 1
 
 logging:
   level: INFO

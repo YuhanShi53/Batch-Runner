@@ -163,7 +163,7 @@ class DirectoryJSONLResultSaver(StreamingSaverMixin, JSONLSaverMixin, ResultSave
         all .jsonl files. Handles the distributed file structure properly.
 
         Returns:
-            Set of base request_id strings (without _rollout_N suffix)
+            Set of request_id strings
         """
         completed_ids = set()
 
@@ -193,9 +193,7 @@ class DirectoryJSONLResultSaver(StreamingSaverMixin, JSONLSaverMixin, ResultSave
                             try:
                                 data = json.loads(line)
                                 if 'request_id' in data:
-                                    # Strip rollout suffix to get base ID
-                                    base_id = data['request_id'].split('_rollout_')[0]
-                                    completed_ids.add(base_id)
+                                    completed_ids.add(data['request_id'])
                             except json.JSONDecodeError as e:
                                 logger.warning(f"Skipping invalid JSON in {jsonl_file}:{line_num}: {e}")
                                 continue

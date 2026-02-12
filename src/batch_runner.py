@@ -38,9 +38,6 @@ class BatchConfig:
     http_max_keepalive_connections: int = 1000  # Maximum keepalive connections (shared)
     http2: bool = True  # Enable HTTP/2
 
-    # Rollout settings
-    num_rollouts: int = 1
-
     # Model settings
     model_name: str = "default"
     temperature: float = 0.7
@@ -254,8 +251,7 @@ class BatchRunner:
     def _estimate_total_items(self) -> int:
         """Estimate total number of requests to process."""
         try:
-            base_count = len(self.loader)
-            return base_count * self.config.num_rollouts
+            return len(self.loader)
         except NotImplementedError:
             return 0
 
@@ -270,7 +266,6 @@ class BatchRunner:
     async def run_async(self):
         """Execute the batch inference process with async."""
         self.logger.info(f"Starting batch inference with {self.config.max_concurrency} concurrent requests")
-        self.logger.info(f"Rollouts per sample: {self.config.num_rollouts}")
         self.logger.info(f"Healthy servers: {self.server_manager.get_server_count()}")
 
         streaming_mode = self.config.get('streaming', True)
@@ -307,18 +302,7 @@ class BatchRunner:
                 self.logger.info(f"Resume: skipping {skipped_count} already completed requests")
                 self.logger.info(f"Resume: {len(all_items)} requests remaining to process")
 
-        # Create rollouts for remaining items
-        requests = []
-        for item in all_items:
-            for _ in range(self.config.num_rollouts):
-                rollout_result = LoadResult(
-                    messages=item.messages,
-                    request_id=item.request_id,
-                    additional_data=item.additional_data
-                )
-                requests.append(rollout_result)
-
-        total_requests = len(requests)
+        total_requests = len(all_items)
         self.stats.total_requests = total_requests
         self.logger.info(f"Total requests to process: {total_requests}")
 
@@ -328,7 +312,7 @@ class BatchRunner:
         # Process all requests concurrently
         tasks = [
             self._process_request_async(req, client)
-            for req in requests
+            for req in all_items
         ]
         await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -355,16 +339,9 @@ class BatchRunner:
                             self.logger.info("Resume mode: skipping already completed requests")
                         continue
 
-                    # Create rollouts
-                    for _ in range(self.config.num_rollouts):
-                        rollout_result = LoadResult(
-                            messages=item.messages,
-                            request_id=item.request_id,
-                            additional_data=item.additional_data
-                        )
-                        # Block if queue is full (backpressure)
-                        await request_queue.put(rollout_result)
-                        total_requests[0] += 1
+                    # Block if queue is full (backpressure)
+                    await request_queue.put(item)
+                    total_requests[0] += 1
 
                 # Log skip statistics at end
                 if skipped_count > 0:

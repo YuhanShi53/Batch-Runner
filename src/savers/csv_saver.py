@@ -110,7 +110,7 @@ class CSVResultSaver(ResultSaver):
         Load completed request_ids from existing CSV output file.
 
         Returns:
-            Set of base request_id strings
+            Set of request_id strings
         """
         completed_ids = set()
 
@@ -125,8 +125,7 @@ class CSVResultSaver(ResultSaver):
                 reader = csv.DictReader(f)
                 for row in reader:
                     if 'request_id' in row:
-                        base_id = row['request_id'].split('_rollout_')[0]
-                        completed_ids.add(base_id)
+                        completed_ids.add(row['request_id'])
 
             logger.info(f"Loaded {len(completed_ids)} completed request_ids")
 

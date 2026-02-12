@@ -31,7 +31,6 @@ saver:
 runner:
   model_name: meta-llama/Llama-3-8b
   max_concurrency: 20
-  num_rollouts: 1
   servers_dir: ./servers
   load_balancing_strategy: round_robin
 
