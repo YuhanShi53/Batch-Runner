@@ -154,24 +154,23 @@ class DirectoryJSONLDataLoader(ChunkedLoaderMixin, StreamingLoaderMixin, Message
 
                 try:
                     # Use the mixin's process_line_to_load_result template method
-                    result = self.process_line_to_load_result(
+                    for result in self.process_line_to_load_result(
                         line=line,
                         line_num=line_num,
                         source=str(rel_path),
                         default_id=f"{rel_path}:{line_num}"
-                    )
+                    ):
+                        if result is None:
+                            # Line was skipped by the mixin
+                            continue
 
-                    if result is None:
-                        # Line was skipped by the mixin
-                        continue
+                        # Add source information to additional_data
+                        if result.additional_data is None:
+                            result.additional_data = {}
+                        result.additional_data['_source_file'] = str(rel_path)
+                        result.additional_data['_source_dir'] = str(rel_dir) if rel_dir != Path('.') else ''
 
-                    # Add source information to additional_data
-                    if result.additional_data is None:
-                        result.additional_data = {}
-                    result.additional_data['_source_file'] = str(rel_path)
-                    result.additional_data['_source_dir'] = str(rel_dir) if rel_dir != Path('.') else ''
-
-                    yield result
+                        yield result
 
                 except json.JSONDecodeError as e:
                     logger.warning(f"Invalid JSON in {rel_path}:{line_num}: {e}")
@@ -301,24 +300,23 @@ class DirectoryJSONLDataLoader(ChunkedLoaderMixin, StreamingLoaderMixin, Message
                 line_num = line_idx + 1  # 1-indexed for error messages
                 try:
                     # Use the mixin's process_line_to_load_result template method
-                    result = self.process_line_to_load_result(
+                    for result in self.process_line_to_load_result(
                         line=line,
                         line_num=line_num,
                         source=str(rel_path),
                         default_id=f"{rel_path}:{line_num}"
-                    )
+                    ):
+                        if result is None:
+                            # Line was skipped by the mixin
+                            continue
 
-                    if result is None:
-                        # Line was skipped by the mixin
-                        continue
+                        # Add source information to additional_data
+                        if result.additional_data is None:
+                            result.additional_data = {}
+                        result.additional_data['_source_file'] = str(rel_path)
+                        result.additional_data['_source_dir'] = str(rel_dir) if rel_dir != Path('.') else ''
 
-                    # Add source information to additional_data
-                    if result.additional_data is None:
-                        result.additional_data = {}
-                    result.additional_data['_source_file'] = str(rel_path)
-                    result.additional_data['_source_dir'] = str(rel_dir) if rel_dir != Path('.') else ''
-
-                    yield result
+                        yield result
 
                 except json.JSONDecodeError as e:
                     logger.warning(f"Invalid JSON in {rel_path}:{line_num}: {e}")
@@ -498,33 +496,46 @@ class MultimodalDirectoryJSONLDataLoader(ChunkedLoaderMixin, StreamingLoaderMixi
 
                 try:
                     # Use the mixin's parse_line method for extensibility
-                    obj = self.parse_line(line, line_num, str(rel_path))
-                    if obj is None:
+                    obj_or_items = self.parse_line(line, line_num, str(rel_path))
+                    if obj_or_items is None:
                         # Line was skipped by the mixin
                         continue
 
-                    # Add source information
-                    obj['_source_file'] = str(rel_path)
-                    obj['_source_dir'] = str(rel_dir) if rel_dir != Path('.') else ''
-                    obj['_source_dir_path'] = str(source_dir)
-
-                    prompt = self.extract_prompt(obj)
-                    if prompt is None:
-                        logger.debug(f"Skipping item {rel_path}:{line_num}: no '{self.prompt_field}' field")
+                    # Normalize to list for uniform processing
+                    items = [obj_or_items] if isinstance(obj_or_items, dict) else obj_or_items
+                    if not items:
                         continue
 
-                    request_id = self.extract_request_id(obj, f"{rel_path}:{line_num}")
-                    images = self.extract_images(obj)
+                    # Process each item
+                    for item_idx, obj in enumerate(items):
+                        # Add source information
+                        obj['_source_file'] = str(rel_path)
+                        obj['_source_dir'] = str(rel_dir) if rel_dir != Path('.') else ''
+                        obj['_source_dir_path'] = str(source_dir)
 
-                    # Extract additional data with proper field exclusion
-                    additional_data = self._extract_additional_data_multimodal(obj)
+                        prompt = self.extract_prompt(obj)
+                        if prompt is None:
+                            logger.debug(f"Skipping item {rel_path}:{line_num}[{item_idx}]: no '{self.prompt_field}' field")
+                            continue
 
-                    yield self._create_multimodal_result(
-                        text=prompt,
-                        images=images,
-                        request_id=str(request_id),
-                        additional_data=additional_data or None
-                    )
+                        # For multi-item case, add suffix to default_id
+                        if len(items) > 1:
+                            item_default_id = f"{rel_path}:{line_num}_{item_idx}"
+                        else:
+                            item_default_id = f"{rel_path}:{line_num}"
+
+                        request_id = self.extract_request_id(obj, item_default_id)
+                        images = self.extract_images(obj)
+
+                        # Extract additional data with proper field exclusion
+                        additional_data = self._extract_additional_data_multimodal(obj)
+
+                        yield self._create_multimodal_result(
+                            text=prompt,
+                            images=images,
+                            request_id=str(request_id),
+                            additional_data=additional_data or None
+                        )
                 except json.JSONDecodeError as e:
                     logger.warning(f"Invalid JSON in {rel_path}:{line_num}: {e}")
                     continue
@@ -734,33 +745,46 @@ class MultimodalDirectoryJSONLDataLoader(ChunkedLoaderMixin, StreamingLoaderMixi
                 line_num = line_idx + 1  # 1-indexed for error messages
                 try:
                     # Use the mixin's parse_line method for extensibility
-                    obj = self.parse_line(line, line_num, str(rel_path))
-                    if obj is None:
+                    obj_or_items = self.parse_line(line, line_num, str(rel_path))
+                    if obj_or_items is None:
                         # Line was skipped by the mixin
                         continue
 
-                    # Add source information
-                    obj['_source_file'] = str(rel_path)
-                    obj['_source_dir'] = str(rel_dir) if rel_dir != Path('.') else ''
-                    obj['_source_dir_path'] = str(source_dir)
-
-                    prompt = self.extract_prompt(obj)
-                    if prompt is None:
-                        logger.debug(f"Skipping item {rel_path}:{line_num}: no '{self.prompt_field}' field")
+                    # Normalize to list for uniform processing
+                    items = [obj_or_items] if isinstance(obj_or_items, dict) else obj_or_items
+                    if not items:
                         continue
 
-                    request_id = self.extract_request_id(obj, f"{rel_path}:{line_num}")
-                    images = self.extract_images(obj)
+                    # Process each item
+                    for item_idx, obj in enumerate(items):
+                        # Add source information
+                        obj['_source_file'] = str(rel_path)
+                        obj['_source_dir'] = str(rel_dir) if rel_dir != Path('.') else ''
+                        obj['_source_dir_path'] = str(source_dir)
 
-                    # Extract additional data with proper field exclusion
-                    additional_data = self._extract_additional_data_multimodal(obj)
+                        prompt = self.extract_prompt(obj)
+                        if prompt is None:
+                            logger.debug(f"Skipping item {rel_path}:{line_num}[{item_idx}]: no '{self.prompt_field}' field")
+                            continue
 
-                    yield self._create_multimodal_result(
-                        text=prompt,
-                        images=images,
-                        request_id=str(request_id),
-                        additional_data=additional_data or None
-                    )
+                        # For multi-item case, add suffix to default_id
+                        if len(items) > 1:
+                            item_default_id = f"{rel_path}:{line_num}_{item_idx}"
+                        else:
+                            item_default_id = f"{rel_path}:{line_num}"
+
+                        request_id = self.extract_request_id(obj, item_default_id)
+                        images = self.extract_images(obj)
+
+                        # Extract additional data with proper field exclusion
+                        additional_data = self._extract_additional_data_multimodal(obj)
+
+                        yield self._create_multimodal_result(
+                            text=prompt,
+                            images=images,
+                            request_id=str(request_id),
+                            additional_data=additional_data or None
+                        )
                 except json.JSONDecodeError as e:
                     logger.warning(f"Invalid JSON in {rel_path}:{line_num}: {e}")
                     continue

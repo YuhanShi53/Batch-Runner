@@ -8,7 +8,7 @@ the entire loader.
 Note: For saver mixins, see src/savers/jsonl_mixin.py
 """
 import json
-from typing import Iterator, Dict, Any, Optional, List, Tuple
+from typing import Iterator, Dict, Any, Optional, List, Tuple, Union
 from pathlib import Path
 import logging
 
@@ -42,9 +42,11 @@ class JSONLLoaderMixin(PromptExtractorMixin):
                 return item.get('custom_prompt_field')
     """
 
-    def parse_line(self, line: str, line_num: int, source: str) -> Optional[Dict[str, Any]]:
+    def parse_line(
+        self, line: str, line_num: int, source: str
+    ) -> Optional[Union[Dict[str, Any], List[Dict[str, Any]]]]:
         """
-        Parse a single JSONL line into a dictionary.
+        Parse a single JSONL line into a dictionary or list of dictionaries.
 
         This method can be overridden to customize line parsing behavior.
         Default implementation uses json.loads().
@@ -55,17 +57,28 @@ class JSONLLoaderMixin(PromptExtractorMixin):
             source: Source identifier (e.g., file path)
 
         Returns:
-            Parsed dictionary, or None to skip this line
+            - Parsed dictionary (single item)
+            - List of dictionaries (multiple items from one line)
+            - None to skip this line
 
         Raises:
             json.JSONDecodeError: If JSON parsing fails (default behavior)
 
-        Example override:
-            def parse_line(self, line: str, line_num: int, source: str) -> Optional[Dict[str, Any]]:
-                # Handle list-format JSONL: [{"key": "value"}]
+        Example override for multiple items (样本裂变):
+            def parse_line(self, line, line_num, source):
                 obj = json.loads(line)
-                if isinstance(obj, list):
-                    return {"items": obj}
+                # 从单个样本生成多个请求
+                if 'variations' in obj:
+                    base_id = obj.get('id', f'line_{line_num}')
+                    return [
+                        {
+                            **obj,
+                            'prompt': variation,
+                            'id': f'{base_id}_var_{i}',
+                            '_variation_index': i
+                        }
+                        for i, variation in enumerate(obj['variations'])
+                    ]
                 return obj
         """
         try:
@@ -196,9 +209,11 @@ class JSONLLoaderMixin(PromptExtractorMixin):
         line_num: int,
         source: str,
         default_id: str
-    ) -> Optional[LoadResult]:
+    ) -> Iterator[Optional[LoadResult]]:
         """
-        Process a single JSONL line into a LoadResult.
+        Process a single JSONL line into one or more LoadResults.
+
+        Now always returns an iterator for consistent handling of single/multiple items.
 
         This is the main template method that orchestrates the parsing process.
         Override individual methods above to customize behavior.
@@ -210,51 +225,69 @@ class JSONLLoaderMixin(PromptExtractorMixin):
             default_id: Default ID to use if extraction fails
 
         Returns:
-            LoadResult object, or None if line should be skipped
+            Iterator that yields LoadResult objects (or nothing if skipped)
+
+        Yields:
+            LoadResult objects (1+), or nothing if line should be skipped
 
         Raises:
             json.JSONDecodeError: If JSON parsing fails
         """
         try:
             # Parse the line
-            item = self.parse_line(line, line_num, source)
-            if item is None:
-                return None
+            item_or_items = self.parse_line(line, line_num, source)
+            if item_or_items is None:
+                return
 
-            # Check if we should skip this item
-            if self.should_skip_item(item):
-                logger.debug(f"Skipping item in {source}:{line_num}")
-                return None
+            # Normalize to list for uniform processing
+            items = [item_or_items] if isinstance(item_or_items, dict) else item_or_items
 
-            # Extract prompt (uses PromptExtractorMixin.extract_prompt if available,
-            # otherwise uses the method defined in this class)
-            prompt = self.extract_prompt(item)
-            if prompt is None:
-                logger.debug(f"Skipping item in {source}:{line_num}: no prompt found")
-                return None
+            # Handle empty list (treat same as None)
+            if not items:
+                return
 
-            # Transform prompt if transform_prompt is available
-            if hasattr(self, 'transform_prompt'):
-                prompt = self.transform_prompt(prompt, item)
+            # Process each item
+            for idx, item in enumerate(items):
+                # Check if we should skip this item
+                if self.should_skip_item(item):
+                    logger.debug(f"Skipping item in {source}:{line_num}[{idx}]")
+                    continue
 
-            # Extract request_id
-            request_id = self.extract_request_id(item, default_id)
+                # Extract prompt (uses PromptExtractorMixin.extract_prompt if available,
+                # otherwise uses the method defined in this class)
+                prompt = self.extract_prompt(item)
+                if prompt is None:
+                    logger.debug(f"Skipping item in {source}:{line_num}[{idx}]: no prompt found")
+                    continue
 
-            # Extract additional data
-            additional_data = self.extract_additional_data(item)
+                # Transform prompt if transform_prompt is available
+                if hasattr(self, 'transform_prompt'):
+                    prompt = self.transform_prompt(prompt, item)
 
-            # Build messages (uses MessagesBuilderMixin.build_messages if available)
-            if hasattr(self, 'build_messages'):
-                messages = self.build_messages(prompt, additional_data)
-            else:
-                messages = [{"role": "user", "content": prompt}]
+                # For multi-item case, add suffix to default_id
+                if len(items) > 1:
+                    item_default_id = f"{default_id}_{idx}"
+                else:
+                    item_default_id = default_id
 
-            return LoadResult(
-                messages=messages,
-                request_id=request_id,
-                additional_data=additional_data or None
-            )
+                # Extract request_id
+                request_id = self.extract_request_id(item, item_default_id)
+
+                # Extract additional data
+                additional_data = self.extract_additional_data(item)
+
+                # Build messages (uses MessagesBuilderMixin.build_messages if available)
+                if hasattr(self, 'build_messages'):
+                    messages = self.build_messages(prompt, additional_data)
+                else:
+                    messages = [{"role": "user", "content": prompt}]
+
+                yield LoadResult(
+                    messages=messages,
+                    request_id=request_id,
+                    additional_data=additional_data or None
+                )
         except Exception as e:
             # Catch unexpected errors and log them, but don't stop iteration
             logger.error(f"Unexpected error processing {source}:{line_num}: {e}")
-            return None
+            return

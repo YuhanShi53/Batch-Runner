@@ -129,15 +129,14 @@ class JSONLDataLoader(ChunkedLoaderMixin, StreamingLoaderMixin, MessagesBuilderM
                     continue
 
                 line_num = line_idx + 1  # 1-indexed for error messages
-                result = self.process_line_to_load_result(
+                for result in self.process_line_to_load_result(
                     line=line,
                     line_num=line_num,
                     source=str(source),
                     default_id=f"req_{line_num}"
-                )
-
-                if result is not None:
-                    yield result
+                ):
+                    if result is not None:
+                        yield result
 
     def _on_source_start(self, source: Path):
         """Log when starting to process the file."""
@@ -321,37 +320,50 @@ class MultimodalJSONLDataLoader(ChunkedLoaderMixin, StreamingLoaderMixin, JSONLL
                 line_num = line_idx + 1  # 1-indexed for error messages
 
                 # Parse the line
-                item = self.parse_line(line, line_num, str(source))
-                if item is None:
+                item_or_items = self.parse_line(line, line_num, str(source))
+                if item_or_items is None:
                     continue
 
-                # Check if we should skip this item
-                if self.should_skip_item(item):
-                    logger.debug(f"Skipping item in {source}:{line_num}")
+                # Normalize to list for uniform processing
+                items = [item_or_items] if isinstance(item_or_items, dict) else item_or_items
+                if not items:
                     continue
 
-                # Extract prompt
-                prompt = self.extract_prompt(item)
-                if prompt is None:
-                    logger.debug(f"Skipping item in {source}:{line_num}: no prompt found")
-                    continue
+                # Process each item
+                for item_idx, item in enumerate(items):
+                    # Check if we should skip this item
+                    if self.should_skip_item(item):
+                        logger.debug(f"Skipping item in {source}:{line_num}[{item_idx}]")
+                        continue
 
-                # Extract request_id
-                request_id = self.extract_request_id(item, f"req_{line_num}")
+                    # Extract prompt
+                    prompt = self.extract_prompt(item)
+                    if prompt is None:
+                        logger.debug(f"Skipping item in {source}:{line_num}[{item_idx}]: no prompt found")
+                        continue
 
-                # Extract images using custom method
-                images = self.extract_images(item)
+                    # For multi-item case, add suffix to default_id
+                    if len(items) > 1:
+                        item_default_id = f"req_{line_num}_{item_idx}"
+                    else:
+                        item_default_id = f"req_{line_num}"
 
-                # Extract additional data using custom method
-                additional_data = self.extract_additional_data(item)
+                    # Extract request_id
+                    request_id = self.extract_request_id(item, item_default_id)
 
-                # Create multimodal result
-                yield self._create_multimodal_result(
-                    text=prompt,
-                    images=images,
-                    request_id=str(request_id),
-                    additional_data=additional_data or None
-                )
+                    # Extract images using custom method
+                    images = self.extract_images(item)
+
+                    # Extract additional data using custom method
+                    additional_data = self.extract_additional_data(item)
+
+                    # Create multimodal result
+                    yield self._create_multimodal_result(
+                        text=prompt,
+                        images=images,
+                        request_id=str(request_id),
+                        additional_data=additional_data or None
+                    )
 
     def _on_source_start(self, source: Path):
         """Log when starting to process the file."""
