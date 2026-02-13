@@ -415,97 +415,147 @@ class BatchRunner:
         """
         Process a single inference request asynchronously.
 
+        Implements server-switching retry logic:
+        - First attempt: Use load balancer to select server
+        - On failure: Select different server for retry (avoid unhealthy servers)
+        - Clear logging: Shows which server used and why/when switching
+
         Args:
             request: LoadResult containing messages and metadata
             client: Shared httpx.AsyncClient
         """
-        server = self.load_balancer.get_server()
-        if not server:
-            self.logger.warning("No healthy servers available")
-            await self.stats.increment_failed()
-            return
+        # Prepare messages once (outside retry loop)
+        messages = list(request.messages)
+        if self.config.system_prompt:
+            messages = [{"role": "system", "content": self.config.system_prompt}] + messages
 
-        # Increment active request count for load balancing
-        server.increment_active()
+        # Build request payload once (outside retry loop)
+        payload = self.config.adapter.build_request(
+            model_name=self.config.model_name,
+            messages=messages,
+            temperature=self.config.temperature,
+            max_tokens=self.config.max_tokens,
+            top_p=self.config.top_p,
+            frequency_penalty=self.config.frequency_penalty,
+            presence_penalty=self.config.presence_penalty,
+        )
 
-        try:
-            # Prepare messages
-            messages = list(request.messages)
-            # Prepend system prompt if configured
-            if self.config.system_prompt:
-                messages = [{"role": "system", "content": self.config.system_prompt}] + messages
+        # Log messages at DEBUG level for inspection
+        self.logger.debug(f"Sending request {request.request_id} with messages:\n{messages}")
 
-            # Log messages at DEBUG level for inspection
-            self.logger.debug(f"Sending request {request.request_id} with messages:\n{messages}")
+        last_server = None
 
-            # Build request payload using adapter
-            payload = self.config.adapter.build_request(
-                model_name=self.config.model_name,
-                messages=messages,
-                temperature=self.config.temperature,
-                max_tokens=self.config.max_tokens,
-                top_p=self.config.top_p,
-                frequency_penalty=self.config.frequency_penalty,
-                presence_penalty=self.config.presence_penalty,
-            )
+        for attempt in range(self.config.max_retries + 1):
+            server = self.load_balancer.get_server()
+            if not server:
+                self.logger.warning(f"[{request.request_id}] No healthy servers available")
+                await self.stats.increment_failed()
+                return
 
-            # Send request async with retry
-            url = self.config.adapter.get_chat_url(server.base_url)
-            start_time = time.time()
+            # Skip if same server as last failed attempt (avoid retrying on unhealthy server)
+            if last_server is not None and server.name == last_server.name:
+                self.logger.debug(
+                    f"[{request.request_id}] Skipping same server {server.name} for retry attempt {attempt + 1}"
+                )
+                # Try to get a different server by marking current as temporarily avoided
+                # The load balancer's healthy filter will skip unhealthy servers
+                server.decrement_active()
+                continue
 
-            response = await self._send_request_async(
-                client=client,
-                url=url,
-                payload=payload
-            )
+            # Increment active request count for load balancing
+            server.increment_active()
+            last_server = server
 
-            # Log timing for performance monitoring
-            elapsed = time.time() - start_time
-            self.logger.debug(
-                f"Request to {server.name} took {elapsed:.2f}s (slow, may indicate server congestion)"
-            )
+            try:
+                # Log which server we're using
+                self.logger.debug(
+                    f"[{request.request_id}] Attempt {attempt + 1}/{self.config.max_retries + 1} "
+                    f"using server {server.name} ({server.ip}:{server.port})"
+                )
 
-            # Parse response using adapter
-            model_output = self.config.adapter.parse_response(response) if response else {}
+                # Send request async (no retry here - we handle retry at higher level)
+                url = self.config.adapter.get_chat_url(server.base_url)
+                start_time = time.time()
 
-            # Save result (run in thread pool to avoid blocking event loop)
-            save_result = SaveResult(
-                request_id=request.request_id,
-                model_output=model_output,
-                additional_data=request.additional_data
-            )
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(self._executor, self.saver.save, save_result)
+                response = await self._send_request_async_no_retry(
+                    client=client,
+                    url=url,
+                    payload=payload
+                )
 
-            # Update statistics
-            await self.stats.increment_completed()
-            tokens = model_output.get('usage', {}).get('total_tokens', 0)
-            await self.stats.add_tokens(tokens)
+                # Log timing for performance monitoring
+                elapsed = time.time() - start_time
+                self.logger.debug(
+                    f"[{request.request_id}] Request to {server.name} took {elapsed:.2f}s"
+                )
 
-            # Record successful request on server
-            server.record_success()
+                # Parse response using adapter
+                model_output = self.config.adapter.parse_response(response) if response else {}
 
-            # Update progress (run in thread pool to avoid blocking)
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(self._executor, self.progress_tracker.update, 1)
+                # Save result (run in thread pool to avoid blocking event loop)
+                save_result = SaveResult(
+                    request_id=request.request_id,
+                    model_output=model_output,
+                    additional_data=request.additional_data
+                )
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(self._executor, self.saver.save, save_result)
 
-        except Exception as e:
-            # Record failed request on server
-            server.record_error()
-            self.logger.error(
-                f"Request {request.request_id} failed on server {server.name}: {e}"
-            )
-            await self.stats.increment_failed()
-            raise
+                # Update statistics
+                await self.stats.increment_completed()
+                tokens = model_output.get('usage', {}).get('total_tokens', 0)
+                await self.stats.add_tokens(tokens)
 
-    async def _send_request_async(
+                # Record successful request on server
+                server.record_success()
+
+                # Update progress (run in thread pool to avoid blocking)
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(self._executor, self.progress_tracker.update, 1)
+
+                # Success! Break out of retry loop
+                break
+
+            except Exception as e:
+                # Record failed request on server
+                server.record_error()
+
+                # Extract exception type for better logging
+                exc_type = type(e).__name__
+                exc_msg = str(e)
+
+                if attempt < self.config.max_retries:
+                    # Retry with different server
+                    delay = self.config.retry_delay * (2 ** attempt)
+                    self.logger.warning(
+                        f"[{request.request_id}] Attempt {attempt + 1}/{self.config.max_retries + 1} "
+                        f"failed on {server.name} ({server.ip}:{server.port}): "
+                        f"[{exc_type}] {exc_msg}. "
+                        f"Retrying on different server in {delay:.1f}s..."
+                    )
+                    await asyncio.sleep(delay)
+                    await self.stats.increment_retried()
+                else:
+                    # All retries exhausted
+                    self.logger.error(
+                        f"[{request.request_id}] All {self.config.max_retries + 1} attempts failed. "
+                        f"Last server: {server.name} ({server.ip}:{server.port}), "
+                        f"Error type: {exc_type}, Error: {exc_msg}"
+                    )
+                    await self.stats.increment_failed()
+                    raise
+
+    async def _send_request_async_no_retry(
         self,
         client,
         url: str,
         payload: dict
     ):
         """
-        Send async HTTP request with retry logic.
+        Send async HTTP request without retry logic.
+
+        Retry logic is handled at a higher level in _process_request_async
+        to enable server switching between retries.
 
         Args:
             client: Shared httpx.AsyncClient
@@ -516,22 +566,11 @@ class BatchRunner:
             Response JSON
 
         Raises:
-            httpx.HTTPError: If all retries fail
+            httpx.HTTPError: If request fails
         """
-        for attempt in range(self.config.max_retries + 1):
-            try:
-                response = await client.post(url, json=payload)
-                response.raise_for_status()
-                return response.json()
-
-            except (httpx.TimeoutException, httpx.ConnectError, httpx.HTTPStatusError):
-                if attempt == self.config.max_retries:
-                    await self.stats.increment_retried()
-                    raise
-
-                delay = self.config.retry_delay * (2 ** attempt)
-                self.logger.debug(f"Request failed (attempt {attempt + 1}), retrying in {delay}s...")
-                await asyncio.sleep(delay)
+        response = await client.post(url, json=payload)
+        response.raise_for_status()
+        return response.json()
 
     def _finalize_stats(self):
         """Finalize statistics."""
