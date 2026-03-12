@@ -18,6 +18,13 @@ class StubLoader:
         return iter(self.items)
 
 
+class StreamingLenUnsupportedLoader:
+    """Loader stub that matches streaming loaders which reject len()."""
+
+    def __len__(self):
+        raise TypeError("Streaming mode does not support len()")
+
+
 class StubSaver:
     """Saver stub with no completed requests."""
 
@@ -26,6 +33,14 @@ class StubSaver:
 
     def cleanup(self):
         pass
+
+
+def test_estimate_total_items_returns_zero_when_loader_len_raises_type_error():
+    """Streaming loaders that reject len() should not break runner initialization."""
+    runner = object.__new__(BatchRunner)
+    runner.loader = StreamingLenUnsupportedLoader()
+
+    assert runner._estimate_total_items() == 0
 
 
 def test_run_batch_async_refills_slots_when_streaming_disabled():

@@ -252,7 +252,7 @@ class BatchRunner:
         """Estimate total number of requests to process."""
         try:
             return len(self.loader)
-        except NotImplementedError:
+        except (NotImplementedError, TypeError):
             return 0
 
     def run(self):
