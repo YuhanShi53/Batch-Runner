@@ -274,14 +274,14 @@ class BatchRunner:
                 self.logger.info("Running in STREAMING mode (async pipeline processing)")
                 await self._run_streaming_async()
             else:
-                self.logger.info("Running in BATCH mode (async processing)")
+                self.logger.info("Running in BATCH mode (load-all + fixed-concurrency async pipeline)")
                 await self._run_batch_async()
         finally:
             await self.close()
             self._finalize_stats()
 
     async def _run_batch_async(self):
-        """Batch mode: load all data first, then process with async."""
+        """Batch mode: load all data first, then process with a fixed-concurrency async pipeline."""
         # Load all data into list
         all_items = []
         for item in self.loader:
@@ -309,12 +309,39 @@ class BatchRunner:
         # Get shared client
         client = await self._get_http_client()
 
-        # Process all requests concurrently
-        tasks = [
-            self._process_request_async(req, client)
-            for req in all_items
-        ]
-        await asyncio.gather(*tasks, return_exceptions=True)
+        # Keep only max_concurrency requests in flight at a time.
+        # When one request completes, immediately schedule the next pending item.
+        max_in_flight = max(1, self.config.max_concurrency)
+        pending_tasks = set()
+        request_iter = iter(all_items)
+
+        def schedule_next() -> bool:
+            try:
+                request = next(request_iter)
+            except StopIteration:
+                return False
+
+            pending_tasks.add(asyncio.create_task(self._process_request_async(request, client)))
+            return True
+
+        for _ in range(min(max_in_flight, total_requests)):
+            schedule_next()
+
+        while pending_tasks:
+            done, pending_tasks = await asyncio.wait(
+                pending_tasks,
+                return_when=asyncio.FIRST_COMPLETED
+            )
+
+            for task in done:
+                try:
+                    task.result()
+                except Exception as e:
+                    self.logger.error(f"Request processing failed: {e}")
+
+            for _ in range(len(done)):
+                if not schedule_next():
+                    break
 
         # Finalize
         await self._finalize_batch_async(total_requests)
