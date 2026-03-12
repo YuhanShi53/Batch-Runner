@@ -212,6 +212,40 @@ class TestLoadBalancer:
             server = lb.get_server()
             assert server.name in ["server_1", "server_2"]
 
+    def test_p2c_cost_aware_prefers_lower_cost(self, monkeypatch):
+        """p2c_cost_aware should prefer the lower-cost server within the sample."""
+        servers = [
+            VLLMServer(name="server_1", ip="127.0.0.1", port=8000),
+            VLLMServer(name="server_2", ip="127.0.0.1", port=8001),
+            VLLMServer(name="server_3", ip="127.0.0.1", port=8002),
+        ]
+        servers[0].inflight_cost = 512
+        servers[1].inflight_cost = 8
+        servers[2].inflight_cost = 64
+
+        monkeypatch.setattr("src.servers.load_balancer.random.sample", lambda population, k: population[:k])
+
+        lb = LoadBalancer(
+            servers,
+            strategy='p2c_cost_aware',
+            selection_sample_size=2,
+        )
+
+        selected = lb.get_server()
+        assert selected.name == "server_2"
+
+    def test_get_server_respects_excluded_names(self):
+        """Excluded servers should not be returned when alternatives exist."""
+        servers = [
+            VLLMServer(name="server_1", ip="127.0.0.1", port=8000),
+            VLLMServer(name="server_2", ip="127.0.0.1", port=8001),
+        ]
+
+        lb = LoadBalancer(servers, strategy='round_robin')
+
+        selected = lb.get_server(excluded_names={"server_1"})
+        assert selected.name == "server_2"
+
     def test_invalid_strategy(self):
         """Test that invalid strategy raises error."""
         servers = [

@@ -5,7 +5,7 @@ import math
 import random
 import threading
 import logging
-from typing import List, Optional
+from typing import Iterable, List, Optional, Sequence, Set
 
 from .manager import VLLMServer
 
@@ -43,7 +43,9 @@ class LoadBalancer:
         allow_fallback: bool = False,
         success_rate_threshold: float = 0.5,
         success_rate_window: int = 10,
-        max_active_requests: int = 50
+        max_active_requests: int = 50,
+        selection_sample_size: int = 2,
+        max_inflight_cost: float = 0.0,
     ):
         """
         Initialize load balancer.
@@ -62,9 +64,12 @@ class LoadBalancer:
         self.success_rate_threshold = success_rate_threshold
         self.success_rate_window = success_rate_window
         self.max_active_requests = max_active_requests
+        self.selection_sample_size = max(2, selection_sample_size)
+        self.max_inflight_cost = max_inflight_cost
         self._lock = threading.Lock()
         self._round_robin_index = 0
         self.logger = logging.getLogger(__name__)
+        self._healthy_servers = tuple(server for server in servers if server.healthy)
 
         # Validate strategy
         valid_strategies = [
@@ -72,12 +77,13 @@ class LoadBalancer:
             'least_connections',
             'adaptive_round_robin',
             'load_aware_round_robin',
+            'p2c_cost_aware',
             'random'
         ]
         if strategy not in valid_strategies:
             raise ValueError(f"Unknown strategy: {strategy}. Must be one of {valid_strategies}")
 
-    def get_server(self) -> Optional[VLLMServer]:
+    def get_server(self, excluded_names: Optional[Set[str]] = None) -> Optional[VLLMServer]:
         """
         Get next server based on load balancing strategy.
 
@@ -88,45 +94,60 @@ class LoadBalancer:
             self.logger.warning("No servers available in load balancer")
             return None
 
-        with self._lock:
-            # Get healthy servers
-            healthy_servers = [s for s in self.servers if s.healthy]
+        candidates = self._candidate_servers(excluded_names=excluded_names)
+        if not candidates:
+            if excluded_names:
+                return self.get_server(excluded_names=None)
+            return None
 
-            if not healthy_servers:
-                if self.allow_fallback and self.servers:
-                    # No healthy servers but fallback is allowed
-                    self.logger.warning(
-                        f"No healthy servers available, falling back to unhealthy server "
-                        f"(total servers: {len(self.servers)})"
-                    )
-                    healthy_servers = self.servers
-                else:
-                    # No healthy servers and fallback not allowed
-                    self.logger.error(
-                        f"No healthy servers available and fallback disabled "
-                        f"(total servers: {len(self.servers)}, healthy: 0)"
-                    )
-                    return None
+        if self.strategy == 'round_robin':
+            return self._round_robin(candidates)
+        if self.strategy == 'least_connections':
+            return self._least_connections(list(candidates))
+        if self.strategy == 'adaptive_round_robin':
+            return self._adaptive_round_robin(list(candidates))
+        if self.strategy == 'load_aware_round_robin':
+            return self._load_aware_round_robin(list(candidates))
+        if self.strategy == 'p2c_cost_aware':
+            return self._p2c_cost_aware(list(candidates))
+        if self.strategy == 'random':
+            return self._random(candidates)
+        raise ValueError(f"Unknown strategy: {self.strategy}")
 
-            if self.strategy == 'round_robin':
-                return self._round_robin(healthy_servers)
-            elif self.strategy == 'least_connections':
-                return self._least_connections(healthy_servers)
-            elif self.strategy == 'adaptive_round_robin':
-                return self._adaptive_round_robin(healthy_servers)
-            elif self.strategy == 'load_aware_round_robin':
-                return self._load_aware_round_robin(healthy_servers)
-            elif self.strategy == 'random':
-                return self._random(healthy_servers)
-            else:
-                raise ValueError(f"Unknown strategy: {self.strategy}")
+    def _candidate_servers(self, excluded_names: Optional[Set[str]] = None) -> Sequence[VLLMServer]:
+        """Return the current healthy server snapshot with optional exclusions."""
+        healthy_servers = self._healthy_servers
+        if healthy_servers:
+            candidates = healthy_servers
+        elif self.allow_fallback and self.servers:
+            self.logger.warning(
+                "No healthy servers available, falling back to unhealthy server (total servers: %s)",
+                len(self.servers),
+            )
+            candidates = tuple(self.servers)
+        else:
+            self.logger.error(
+                "No healthy servers available and fallback disabled (total servers: %s, healthy: 0)",
+                len(self.servers),
+            )
+            return ()
 
-    def _round_robin(self, servers: List[VLLMServer]) -> VLLMServer:
+        if excluded_names:
+            candidates = tuple(server for server in candidates if server.name not in excluded_names)
+        return candidates
+
+    def _round_robin(self, servers: Sequence[VLLMServer]) -> VLLMServer:
         """Round-robin load balancing."""
-        index = self._round_robin_index % len(servers)
+        index = self._next_round_robin_index(len(servers))
         server = servers[index]
-        self._round_robin_index = (index + 1) % len(servers)
         return server
+
+    def _next_round_robin_index(self, pool_size: int) -> int:
+        """Advance and return the current round-robin index."""
+        with self._lock:
+            index = self._round_robin_index % pool_size
+            self._round_robin_index = (index + 1) % pool_size
+            return index
 
     def _is_underperforming(self, server: VLLMServer, avg_success_rate: Optional[float]) -> bool:
         """Return True when a server has enough history and is clearly underperforming."""
@@ -171,15 +192,16 @@ class LoadBalancer:
 
     def _select_first_in_round_robin_order(
         self,
-        servers: List[VLLMServer],
-        candidates: List[VLLMServer]
+        servers: Sequence[VLLMServer],
+        candidates: Sequence[VLLMServer]
     ) -> Optional[VLLMServer]:
         """Pick the first candidate encountered in the current round-robin order."""
         if not candidates:
             return None
 
         candidate_ids = {id(server) for server in candidates}
-        start_index = self._round_robin_index % len(servers)
+        with self._lock:
+            start_index = self._round_robin_index % len(servers)
 
         for offset in range(len(servers)):
             server = servers[(start_index + offset) % len(servers)]
@@ -197,12 +219,13 @@ class LoadBalancer:
         candidates = [server for server in servers if score_fn(server) == best_score]
         return self._select_first_in_round_robin_order(servers, candidates)
 
-    def _advance_round_robin_index(self, servers: List[VLLMServer], selected: VLLMServer) -> None:
+    def _advance_round_robin_index(self, servers: Sequence[VLLMServer], selected: VLLMServer) -> None:
         """Advance round-robin index to the slot after the selected server."""
-        for i, server in enumerate(servers):
-            if server == selected:
-                self._round_robin_index = (i + 1) % len(servers)
-                return
+        with self._lock:
+            for i, server in enumerate(servers):
+                if server == selected:
+                    self._round_robin_index = (i + 1) % len(servers)
+                    return
 
     def _least_connections(self, servers: List[VLLMServer]) -> VLLMServer:
         """
@@ -392,7 +415,50 @@ class LoadBalancer:
 
         return selected
 
-    def _random(self, servers: List[VLLMServer]) -> VLLMServer:
+    def _p2c_cost_aware(self, servers: List[VLLMServer]) -> VLLMServer:
+        """
+        Select a server using power-of-two-choices with inflight cost awareness.
+
+        This keeps selection cost near O(1), which matters when high concurrency
+        and large server pools make full-cluster scans too expensive.
+        """
+        if not servers:
+            return None
+
+        sample_size = min(len(servers), self.selection_sample_size)
+        sampled = random.sample(servers, sample_size) if len(servers) > sample_size else list(servers)
+
+        admissible = [
+            server for server in sampled
+            if self._passes_admission_limits(server)
+        ]
+        candidates = admissible if admissible else sampled
+        candidates = self._filter_underperforming_servers(candidates)
+
+        return min(
+            candidates,
+            key=lambda server: (self._cost_score(server), server.active_requests)
+        )
+
+    def _cost_score(self, server: VLLMServer) -> float:
+        """Combine inflight cost and historical success rate into one score."""
+        base_cost = server.inflight_cost if server.inflight_cost > 0 else float(server.active_requests)
+        total_requests = server.success_count + server.error_count
+        if total_requests >= self.success_rate_window:
+            penalty = 1.0 / max(server.success_rate, 0.1)
+        else:
+            penalty = 1.0
+        return base_cost * penalty
+
+    def _passes_admission_limits(self, server: VLLMServer) -> bool:
+        """Return True when the server is below configured request/cost limits."""
+        if self.max_active_requests > 0 and server.active_requests >= self.max_active_requests:
+            return False
+        if self.max_inflight_cost > 0 and server.inflight_cost >= self.max_inflight_cost:
+            return False
+        return True
+
+    def _random(self, servers: Sequence[VLLMServer]) -> VLLMServer:
         """Random load balancing."""
         return random.choice(servers)
 
@@ -408,6 +474,7 @@ class LoadBalancer:
         with self._lock:
             old_healthy_count = sum(1 for s in self.servers if s.healthy)
             self.servers = servers
+            self._healthy_servers = tuple(server for server in self.servers if server.healthy)
             new_healthy_count = sum(1 for s in self.servers if s.healthy)
 
             # Reset round-robin index if server count changed significantly
@@ -443,6 +510,8 @@ class LoadBalancer:
                 'success_rate_threshold': f"{self.success_rate_threshold:.2%}",
                 'success_rate_window': self.success_rate_window,
                 'max_active_requests': self.max_active_requests,
+                'selection_sample_size': self.selection_sample_size,
+                'max_inflight_cost': self.max_inflight_cost,
                 'total_requests': sum(s.request_count for s in self.servers),
                 'servers': server_stats
             }

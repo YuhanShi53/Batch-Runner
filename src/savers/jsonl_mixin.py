@@ -5,11 +5,11 @@ These mixins provide a template method pattern where users can override
 specific methods to customize JSONL output formatting without rewriting
 the entire saver.
 """
-import json
-from typing import Dict, Any
 from datetime import datetime
+from typing import Dict, Any
 
 from .base import SaveResult
+from ..utils.json_codec import json_codec
 
 
 class JSONLSaverMixin:
@@ -51,15 +51,43 @@ class JSONLSaverMixin:
                     "tokens": result.model_output.get('usage', {}).get('total_tokens', 0)
                 }
         """
-        output_data = {
-            'request_id': result.request_id,
-            'model_output': result.model_output,
-            'additional_data': result.additional_data,
-            'timestamp': datetime.now().isoformat()
-        }
+        projection = getattr(self, "output_projection", self.config.get("output_projection", "full"))
+        include_timestamp = getattr(
+            self,
+            "include_timestamp",
+            self.config.get("include_timestamp", projection == "full"),
+        )
+
+        if projection == "minimal":
+            choices = result.model_output.get("choices", []) if result.model_output else []
+            first_choice = choices[0] if choices else {}
+            message = first_choice.get("message", {}) if isinstance(first_choice, dict) else {}
+            output_data = {
+                "request_id": result.request_id,
+                "content": message.get("content"),
+                "finish_reason": first_choice.get("finish_reason"),
+                "usage": result.model_output.get("usage", {}) if result.model_output else {},
+            }
+            if result.additional_data is not None:
+                output_data["additional_data"] = result.additional_data
+        else:
+            output_data = {
+                "request_id": result.request_id,
+                "model_output": result.model_output,
+                "additional_data": result.additional_data,
+            }
+            if include_timestamp:
+                output_data["timestamp"] = datetime.now().isoformat()
 
         if result.error:
-            output_data['error'] = result.error
+            output_data["error"] = result.error
+
+        output_fields = getattr(self, "output_fields", self.config.get("output_fields"))
+        if output_fields:
+            output_data = {
+                key: value for key, value in output_data.items()
+                if key in output_fields
+            }
 
         return output_data
 
@@ -81,7 +109,7 @@ class JSONLSaverMixin:
                 # Custom serialization with specific options
                 return json.dumps(output_data, ensure_ascii=False, indent=None)
         """
-        return json.dumps(output_data, ensure_ascii=False)
+        return json_codec.dumps_text(output_data)
 
     def process_result_to_line(self, result: SaveResult) -> str:
         """

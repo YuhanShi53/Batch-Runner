@@ -10,8 +10,10 @@ from pathlib import Path
 import logging
 import threading
 import traceback
+from datetime import datetime
 
 from .base import SaveResult
+from ..utils.json_codec import json_codec
 
 
 logger = logging.getLogger(__name__)
@@ -57,7 +59,7 @@ class StreamingSaverMixin:
         Subclasses should call this in their _initialize() method.
         """
         self.streaming = self.config.get('streaming', True)
-        self.immediate_flush = self.config.get('immediate_flush', True)
+        self.immediate_flush = self.config.get('immediate_flush', False)
         self._lock = threading.Lock()
 
         if not self.streaming:
@@ -304,17 +306,43 @@ class OutputFormatterMixin:
                     "model": result.model_output.get('model', 'unknown')
                 }
         """
-        from datetime import datetime
+        projection = getattr(self, "output_projection", self.config.get("output_projection", "full"))
+        include_timestamp = getattr(
+            self,
+            "include_timestamp",
+            self.config.get("include_timestamp", projection == "full"),
+        )
 
-        output_data = {
-            'request_id': result.request_id,
-            'model_output': result.model_output,
-            'additional_data': result.additional_data,
-            'timestamp': datetime.now().isoformat()
-        }
+        if projection == "minimal":
+            choices = result.model_output.get("choices", []) if result.model_output else []
+            first_choice = choices[0] if choices else {}
+            message = first_choice.get("message", {}) if isinstance(first_choice, dict) else {}
+            output_data = {
+                "request_id": result.request_id,
+                "content": message.get("content"),
+                "finish_reason": first_choice.get("finish_reason"),
+                "usage": result.model_output.get("usage", {}) if result.model_output else {},
+            }
+            if result.additional_data is not None:
+                output_data["additional_data"] = result.additional_data
+        else:
+            output_data = {
+                'request_id': result.request_id,
+                'model_output': result.model_output,
+                'additional_data': result.additional_data,
+            }
+            if include_timestamp:
+                output_data['timestamp'] = datetime.now().isoformat()
 
         if result.error:
             output_data['error'] = result.error
+
+        output_fields = getattr(self, "output_fields", self.config.get("output_fields"))
+        if output_fields:
+            output_data = {
+                key: value for key, value in output_data.items()
+                if key in output_fields
+            }
 
         return output_data
 
@@ -363,6 +391,10 @@ class OutputFormatterMixin:
             return result.model_output.get('usage', {})
         except (AttributeError, TypeError):
             return {}
+
+    def serialize_output(self, output_data: Dict[str, Any]) -> str:
+        """Serialize formatted output using the shared JSON codec."""
+        return json_codec.dumps_text(output_data)
 
 
 class MultimodalOutputMixin:
@@ -453,11 +485,13 @@ class BatchWriterMixin:
         Args:
             formatted_data: Formatted data to buffer
         """
+        should_flush = False
         with self._batch_lock:
             self._batch_buffer.append(formatted_data)
+            should_flush = len(self._batch_buffer) >= self.batch_size
 
-            if len(self._batch_buffer) >= self.batch_size:
-                self._flush_batch()
+        if should_flush:
+            self._flush_batch()
 
     def _flush_batch(self) -> None:
         """

@@ -102,11 +102,23 @@ def _validate_config(config: Dict[str, Any]):
         'success_rate_window': 10,
         'max_active_requests': 50,
         'resume': True,  # Enable resuming from existing output (default: True)
+        'resume_backend': 'legacy_output_scan',
+        'producer_prefetch': 100,
+        'writer_queue_size': 1000,
+        'writer_batch_size': 100,
+        'writer_flush_interval_ms': 100,
+        'writer_workers': 1,
+        'selection_sample_size': 2,
+        'max_inflight_cost': 0.0,
+        'image_encode_workers': 4,
     }
 
     for key, value in runner_defaults.items():
         if key not in config['runner']:
             config['runner'][key] = value
+
+    if 'producer_prefetch' not in config['runner'] and 'stream_queue_size' in config['runner']:
+        config['runner']['producer_prefetch'] = config['runner']['stream_queue_size']
 
 
 def get_loader_class(class_name: str, module_prefix: str = 'src.loaders') -> Type[DataLoader]:

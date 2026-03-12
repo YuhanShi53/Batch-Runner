@@ -35,7 +35,7 @@ runner:
 
   # Server configuration
   servers_dir: ./vllm_servers
-  load_balancing_strategy: round_robin  # Options: round_robin, least_connections, random
+  load_balancing_strategy: round_robin  # Options: round_robin, least_connections, adaptive_round_robin, load_aware_round_robin, p2c_cost_aware, random
 
   # Health check configuration
   health_check_interval: 30  # Seconds between health checks

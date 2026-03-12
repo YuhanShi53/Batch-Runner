@@ -220,7 +220,8 @@ class DirectoryJSONLDataLoader(ChunkedLoaderMixin, StreamingLoaderMixin, Message
                     yield LoadResult(
                         messages=messages,
                         request_id=str(request_id),
-                        additional_data=additional_data or None
+                        additional_data=additional_data or None,
+                        dispatch_cost=self.estimate_dispatch_cost(prompt, additional_data),
                     )
                 except Exception as e:
                     logger.error(
@@ -534,7 +535,9 @@ class MultimodalDirectoryJSONLDataLoader(ChunkedLoaderMixin, StreamingLoaderMixi
                             text=prompt,
                             images=images,
                             request_id=str(request_id),
-                            additional_data=additional_data or None
+                            additional_data=additional_data or None,
+                            resume_key=(str(rel_path), line_num, item_idx),
+                            dispatch_cost=self.estimate_multimodal_dispatch_cost(prompt, images, additional_data),
                         )
                 except json.JSONDecodeError as e:
                     logger.warning(f"Invalid JSON in {rel_path}:{line_num}: {e}")
@@ -555,7 +558,7 @@ class MultimodalDirectoryJSONLDataLoader(ChunkedLoaderMixin, StreamingLoaderMixi
         file_path, rel_path, _, _ = source
         logger.error(f"Error reading file {rel_path}: {error}")
 
-    def _resolve_image_path(self, image_path: str, source_dir_path: str) -> str:
+    def _resolve_image_path(self, image_path: str, source_dir_path: str = "") -> Path:
         """
         Resolve image path relative to the source conv.jsonl file's directory.
 
@@ -570,16 +573,16 @@ class MultimodalDirectoryJSONLDataLoader(ChunkedLoaderMixin, StreamingLoaderMixi
 
         # If already absolute, return as-is
         if path.is_absolute():
-            return image_path
+            return path
 
         # If use_source_dir_as_base, resolve relative to source file's directory
         if self.use_source_dir_as_base:
             source_dir = Path(source_dir_path)
             resolved = source_dir / path
-            return str(resolved)
+            return resolved
 
         # Otherwise use image_base_dir (handled by parent class's _encode_image_to_base64)
-        return image_path
+        return path
 
     def extract_images(self, item: Dict[str, Any]) -> Optional[List[str]]:
         """
@@ -603,10 +606,10 @@ class MultimodalDirectoryJSONLDataLoader(ChunkedLoaderMixin, StreamingLoaderMixi
                 # Convert single value to list and resolve paths
                 if isinstance(image_value, str):
                     resolved = self._resolve_image_path(image_value, source_dir_path)
-                    return [resolved]
+                    return [str(resolved)]
                 elif isinstance(image_value, list):
                     return [
-                        self._resolve_image_path(img, source_dir_path)
+                        str(self._resolve_image_path(img, source_dir_path))
                         for img in image_value
                     ]
                 else:
@@ -626,7 +629,7 @@ class MultimodalDirectoryJSONLDataLoader(ChunkedLoaderMixin, StreamingLoaderMixi
                     ]
                 elif isinstance(images_value, str):
                     resolved = self._resolve_image_path(images_value, source_dir_path)
-                    return [resolved]
+                    return [str(resolved)]
                 else:
                     logger.warning(
                         f"Invalid {self.images_field} type in item {item.get(self.id_field)}: "
@@ -665,7 +668,8 @@ class MultimodalDirectoryJSONLDataLoader(ChunkedLoaderMixin, StreamingLoaderMixi
                         text=prompt,
                         images=images,
                         request_id=str(request_id),
-                        additional_data=additional_data or None
+                        additional_data=additional_data or None,
+                        dispatch_cost=self.estimate_multimodal_dispatch_cost(prompt, images, additional_data),
                     )
                 except Exception as e:
                     logger.error(
@@ -783,7 +787,9 @@ class MultimodalDirectoryJSONLDataLoader(ChunkedLoaderMixin, StreamingLoaderMixi
                             text=prompt,
                             images=images,
                             request_id=str(request_id),
-                            additional_data=additional_data or None
+                            additional_data=additional_data or None,
+                            resume_key=(str(rel_path), line_num, item_idx),
+                            dispatch_cost=self.estimate_multimodal_dispatch_cost(prompt, images, additional_data),
                         )
                 except json.JSONDecodeError as e:
                     logger.warning(f"Invalid JSON in {rel_path}:{line_num}: {e}")

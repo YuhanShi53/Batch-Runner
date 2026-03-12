@@ -107,7 +107,8 @@ class JSONDataLoader(ChunkedLoaderMixin, DataLoader):
                 yield LoadResult(
                     messages=[{"role": "user", "content": prompt}],
                     request_id=str(request_id),
-                    additional_data=additional_data or None
+                    additional_data=additional_data or None,
+                    dispatch_cost=self.estimate_dispatch_cost(prompt, additional_data),
                 )
             except Exception as e:
                 logger.error(
@@ -247,7 +248,8 @@ class MultimodalJSONDataLoader(ChunkedLoaderMixin, MultimodalDataLoader):
                     text=prompt,
                     images=images,
                     request_id=str(request_id),
-                    additional_data=additional_data or None
+                    additional_data=additional_data or None,
+                    dispatch_cost=self.estimate_multimodal_dispatch_cost(prompt, images, additional_data),
                 )
             except Exception as e:
                 logger.error(

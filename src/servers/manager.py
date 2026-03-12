@@ -3,6 +3,7 @@ vLLM server manager module.
 
 Manages a pool of vLLM servers with automatic discovery and health checking.
 """
+import asyncio
 import re
 import time
 import threading
@@ -13,9 +14,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 try:
-    import requests
+    import httpx
 except ImportError:
-    requests = None
+    httpx = None
 
 
 class ServerState(Enum):
@@ -55,6 +56,7 @@ class VLLMServer:
     success_count: int = 0
     error_count: int = 0
     active_requests: int = 0
+    inflight_cost: float = 0.0
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     @property
@@ -79,11 +81,10 @@ class VLLMServer:
             Success rate as a float between 0.0 and 1.0.
             Returns 1.0 if no requests have been made.
         """
-        with self._lock:
-            total = self.success_count + self.error_count
-            if total == 0:
-                return 1.0
-            return self.success_count / total
+        total = self.success_count + self.error_count
+        if total == 0:
+            return 1.0
+        return self.success_count / total
 
     @property
     def effective_load(self) -> int:
@@ -96,59 +97,51 @@ class VLLMServer:
         Returns:
             Effective load score (higher = more loaded/less desirable)
         """
-        with self._lock:
-            # Base load is active requests
-            base_load = self.active_requests
+        base_load = max(self.active_requests, int(self.inflight_cost))
 
-            # Apply penalty for low success rate
-            # If success rate is 50%, effective load doubles
-            # If success rate is 25%, effective load quadruples
-            total = self.success_count + self.error_count
-            if total == 0:
-                success_rate = 1.0
-            else:
-                success_rate = self.success_count / total
+        total = self.success_count + self.error_count
+        success_rate = 1.0 if total == 0 else self.success_count / total
 
-            if success_rate < 1.0:
-                penalty_factor = 1.0 / max(success_rate, 0.1)  # Cap at 10x penalty
-                return int(base_load * penalty_factor)
-            return base_load
+        if success_rate < 1.0:
+            penalty_factor = 1.0 / max(success_rate, 0.1)  # Cap at 10x penalty
+            return int(base_load * penalty_factor)
+        return base_load
 
-    def increment_active(self) -> int:
+    def increment_active(self, cost: float = 1.0) -> int:
         """
         Increment active request count.
 
         Returns:
             New active request count
         """
-        with self._lock:
-            self.active_requests += 1
-            return self.active_requests
+        self.active_requests += 1
+        self.inflight_cost += max(1.0, float(cost))
+        return self.active_requests
 
-    def decrement_active(self) -> int:
+    def decrement_active(self, cost: float = 1.0) -> int:
         """
         Decrement active request count.
 
         Returns:
             New active request count
         """
-        with self._lock:
-            self.active_requests = max(0, self.active_requests - 1)
-            return self.active_requests
+        self.active_requests = max(0, self.active_requests - 1)
+        self.inflight_cost = max(0.0, self.inflight_cost - max(1.0, float(cost)))
+        return self.active_requests
 
-    def record_success(self) -> None:
+    def record_success(self, cost: float = 1.0) -> None:
         """Record a successful request completion."""
-        with self._lock:
-            self.success_count += 1
-            self.request_count += 1
-            self.active_requests = max(0, self.active_requests - 1)
+        self.success_count += 1
+        self.request_count += 1
+        self.active_requests = max(0, self.active_requests - 1)
+        self.inflight_cost = max(0.0, self.inflight_cost - max(1.0, float(cost)))
 
-    def record_error(self) -> None:
+    def record_error(self, cost: float = 1.0) -> None:
         """Record a failed request."""
-        with self._lock:
-            self.error_count += 1
-            self.request_count += 1
-            self.active_requests = max(0, self.active_requests - 1)
+        self.error_count += 1
+        self.request_count += 1
+        self.active_requests = max(0, self.active_requests - 1)
+        self.inflight_cost = max(0.0, self.inflight_cost - max(1.0, float(cost)))
 
 
 class VLLMServerManager:
@@ -176,21 +169,24 @@ class VLLMServerManager:
         self.health_check_interval = config.get('health_check_interval', 30)
         self.max_failures = config.get('max_failures', 5)
         self.timeout = config.get('request_timeout', 120)
+        self.health_check_timeout = config.get('health_check_timeout', 5)
+        self.health_check_concurrency = max(1, config.get('health_check_concurrency', 32))
+        self.http2 = config.get('http2', False)
 
-        if requests is None:
-            raise ImportError("requests library is required. Install it with: pip install requests")
+        if httpx is None:
+            raise ImportError("httpx library is required. Install it with: pip install httpx[http2]")
 
         self.servers: List[VLLMServer] = []
         self._lock = threading.Lock()
-        self._health_check_thread: Optional[threading.Thread] = None
         self._stop_health_check = threading.Event()
+        self._health_check_task: Optional[asyncio.Task] = None
+        self._health_client = None
         self._state_change_callbacks: List[Callable[[VLLMServer, bool], None]] = []
 
         # Setup logger
         self.logger = logging.getLogger(__name__)
 
         self._discover_servers()
-        self._start_health_checker()
 
     def _discover_servers(self):
         """Discover vLLM servers from directory names."""
@@ -216,99 +212,133 @@ class VLLMServerManager:
 
         print(f"[VLLMServerManager] Discovered {len(self.servers)} vLLM servers")
 
-    def _start_health_checker(self):
-        """Start background health checking thread."""
-        def health_check_loop():
+    async def start_async(self):
+        """Start background async health checking if it is enabled."""
+        if self.health_check_interval <= 0 or self._health_check_task is not None:
+            return
+
+        limits = httpx.Limits(
+            max_connections=min(len(self.servers), self.health_check_concurrency),
+            max_keepalive_connections=min(len(self.servers), self.health_check_concurrency),
+        )
+        self._health_client = httpx.AsyncClient(
+            timeout=self.health_check_timeout,
+            limits=limits,
+            http2=self.http2,
+        )
+        await self._check_all_servers_async()
+        self._stop_health_check.clear()
+        self._health_check_task = asyncio.create_task(self._health_check_loop())
+
+    async def _health_check_loop(self):
+        """Periodically refresh server health in the active event loop."""
+        try:
             while not self._stop_health_check.is_set():
-                self._check_all_servers()
-                self._stop_health_check.wait(self.health_check_interval)
+                await asyncio.sleep(self.health_check_interval)
+                if self._stop_health_check.is_set():
+                    break
+                await self._check_all_servers_async()
+        except asyncio.CancelledError:
+            raise
 
-        self._health_check_thread = threading.Thread(target=health_check_loop, daemon=True)
-        self._health_check_thread.start()
+    async def _check_all_servers_async(self):
+        """Check health of all servers with bounded parallelism."""
+        if self._health_client is None:
+            return
 
-    def _check_all_servers(self):
-        """Check health of all servers."""
-        with self._lock:
-            for server in self.servers:
+        servers = self.get_all_servers()
+        semaphore = asyncio.Semaphore(self.health_check_concurrency)
+
+        async def check(server: VLLMServer):
+            async with semaphore:
                 server.last_health_check = time.time()
-
                 try:
-                    response = requests.get(
-                        server.health_url(),
-                        timeout=5
+                    response = await self._health_client.get(server.health_url())
+                    return server, response.status_code == 200, response.status_code, None
+                except httpx.TimeoutException as exc:
+                    return server, False, None, exc
+                except httpx.ConnectError as exc:
+                    return server, False, None, exc
+                except Exception as exc:  # pragma: no cover - defensive
+                    return server, False, None, exc
+
+        results = await asyncio.gather(*(check(server) for server in servers), return_exceptions=False)
+        for server, is_healthy, status_code, error in results:
+            self._apply_health_result(server, is_healthy, status_code=status_code, error=error)
+
+    def _apply_health_result(
+        self,
+        server: VLLMServer,
+        is_healthy: bool,
+        status_code: Optional[int] = None,
+        error: Optional[Exception] = None,
+    ):
+        """Apply a completed health probe result without holding a lock during I/O."""
+        notify_state = None
+
+        with self._lock:
+            if is_healthy:
+                previous_failures = server.failure_count
+                server.failure_count = 0
+                if not server.healthy:
+                    server.healthy = True
+                    server.last_state_change = time.time()
+                    notify_state = True
+                    self.logger.info(
+                        "[HealthCheck] Server %s (%s:%s) is now HEALTHY (recovered after %s failures)",
+                        server.name,
+                        server.ip,
+                        server.port,
+                        previous_failures,
                     )
-                    is_healthy = response.status_code == 200
+            else:
+                server.failure_count += 1
 
-                    if is_healthy:
-                        server.failure_count = 0
-                        if not server.healthy:
-                            # Server recovered
-                            server.healthy = True
-                            server.last_state_change = time.time()
-                            self.logger.info(
-                                f"[HealthCheck] Server {server.name} ({server.ip}:{server.port}) "
-                                f"is now HEALTHY (recovered after {server.failure_count} failures)"
-                            )
-                            self._notify_state_change(server, True)
-                    else:
-                        server.failure_count += 1
-                        self.logger.warning(
-                            f"[HealthCheck] Server {server.name} returned status {response.status_code} "
-                            f"(failure {server.failure_count}/{self.max_failures})"
-                        )
-                        if server.failure_count >= self.max_failures and server.healthy:
-                            server.healthy = False
-                            server.last_state_change = time.time()
-                            self.logger.error(
-                                f"[HealthCheck] Server {server.name} ({server.ip}:{server.port}) "
-                                f"is now UNHEALTHY (marked as down after {server.failure_count} consecutive failures)"
-                            )
-                            self._notify_state_change(server, False)
-
-                except requests.exceptions.Timeout:
-                    server.failure_count += 1
+                if status_code is not None:
                     self.logger.warning(
-                        f"[HealthCheck] Server {server.name} timed out "
-                        f"(failure {server.failure_count}/{self.max_failures})"
+                        "[HealthCheck] Server %s returned status %s (failure %s/%s)",
+                        server.name,
+                        status_code,
+                        server.failure_count,
+                        self.max_failures,
                     )
-                    if server.failure_count >= self.max_failures and server.healthy:
-                        server.healthy = False
-                        server.last_state_change = time.time()
-                        self.logger.error(
-                            f"[HealthCheck] Server {server.name} ({server.ip}:{server.port}) "
-                            f"is now UNHEALTHY (timeout after {server.failure_count} consecutive failures)"
-                        )
-                        self._notify_state_change(server, False)
-
-                except requests.exceptions.ConnectionError as e:
-                    server.failure_count += 1
+                elif isinstance(error, httpx.TimeoutException):
                     self.logger.warning(
-                        f"[HealthCheck] Server {server.name} connection error: {str(e)} "
-                        f"(failure {server.failure_count}/{self.max_failures})"
+                        "[HealthCheck] Server %s timed out (failure %s/%s)",
+                        server.name,
+                        server.failure_count,
+                        self.max_failures,
                     )
-                    if server.failure_count >= self.max_failures and server.healthy:
-                        server.healthy = False
-                        server.last_state_change = time.time()
-                        self.logger.error(
-                            f"[HealthCheck] Server {server.name} ({server.ip}:{server.port}) "
-                            f"is now UNHEALTHY (connection failed after {server.failure_count} consecutive failures)"
-                        )
-                        self._notify_state_change(server, False)
-
-                except Exception as e:
-                    server.failure_count += 1
+                elif isinstance(error, httpx.ConnectError):
+                    self.logger.warning(
+                        "[HealthCheck] Server %s connection error: %s (failure %s/%s)",
+                        server.name,
+                        str(error),
+                        server.failure_count,
+                        self.max_failures,
+                    )
+                else:
                     self.logger.error(
-                        f"[HealthCheck] Server {server.name} unexpected error: {str(e)} "
-                        f"(failure {server.failure_count}/{self.max_failures})"
+                        "[HealthCheck] Server %s unexpected error: %s (failure %s/%s)",
+                        server.name,
+                        str(error),
+                        server.failure_count,
+                        self.max_failures,
                     )
-                    if server.failure_count >= self.max_failures and server.healthy:
-                        server.healthy = False
-                        server.last_state_change = time.time()
-                        self.logger.error(
-                            f"[HealthCheck] Server {server.name} ({server.ip}:{server.port}) "
-                            f"is now UNHEALTHY (error after {server.failure_count} consecutive failures)"
-                        )
-                        self._notify_state_change(server, False)
+
+                if server.failure_count >= self.max_failures and server.healthy:
+                    server.healthy = False
+                    server.last_state_change = time.time()
+                    notify_state = False
+                    self.logger.error(
+                        "[HealthCheck] Server %s (%s:%s) is now UNHEALTHY",
+                        server.name,
+                        server.ip,
+                        server.port,
+                    )
+
+        if notify_state is not None:
+            self._notify_state_change(server, notify_state)
 
     def get_healthy_servers(self) -> List[VLLMServer]:
         """Get list of healthy servers."""
@@ -342,9 +372,23 @@ class VLLMServerManager:
             except Exception as e:
                 self.logger.error(f"Error in state change callback: {e}")
 
-    def shutdown(self):
-        """Stop health checker and cleanup resources."""
+    async def aclose(self):
+        """Stop health checking and release async resources."""
         self._stop_health_check.set()
-        if self._health_check_thread and self._health_check_thread.is_alive():
-            # Wait for thread to finish (may be in middle of HTTP request)
-            self._health_check_thread.join(timeout=10)
+        if self._health_check_task is not None:
+            self._health_check_task.cancel()
+            try:
+                await self._health_check_task
+            except asyncio.CancelledError:
+                pass
+            self._health_check_task = None
+
+        if self._health_client is not None:
+            await self._health_client.aclose()
+            self._health_client = None
+
+    def shutdown(self):
+        """Compatibility wrapper for callers that do not await cleanup."""
+        self._stop_health_check.set()
+        if self._health_check_task is not None:
+            self._health_check_task.cancel()

@@ -1,75 +1,70 @@
-# vLLM Batch Runner Configuration - Directory Tree Mode (Streaming Pipeline)
-# This configuration uses a streaming pipeline to process large datasets efficiently.
-# Data is loaded, processed, and saved concurrently with minimal memory footprint.
+# Directory JSONL streaming example
+# Uses the current bounded producer/scheduler/writer pipeline.
 
-# DataLoader Configuration
 loader:
   class: DirectoryJSONLDataLoader
   params:
-    input_dir: data/input  # Root directory containing conv.jsonl files
-    file_pattern: conv.jsonl  # File pattern to search for (default: conv.jsonl)
-    prompt_field: prompt  # Field name containing the prompt text
-    id_field: id  # Field name containing the ID
-    recursive: true  # Whether to search subdirectories (default: true)
-    streaming: true  # Enable streaming mode (default: true)
+    input_dir: data/input
+    file_pattern: conv.jsonl
+    prompt_field: prompt
+    id_field: id
+    recursive: true
+    streaming: true
 
-# ResultSaver Configuration
 saver:
   class: DirectoryJSONLResultSaver
   params:
-    output_dir: data/output  # Root output directory
-    output_file_pattern: result.jsonl  # Default output filename
-    preserve_structure: true  # Mirror input directory structure (default: true)
+    output_dir: data/output
+    output_file_pattern: result.jsonl
+    preserve_structure: true
+    output_projection: minimal
+    immediate_flush: false
 
-# Batch Runner Configuration
 runner:
-  # Concurrency settings
-  max_concurrency: 10
-  max_retries: 3
-  retry_delay: 1.0
-  request_timeout: 120
+  max_concurrency: 256
+  max_retries: 2
+  retry_delay: 0.5
+  request_timeout: 180
 
-  # Model parameters
+  http_max_connections: 512
+  http_max_keepalive_connections: 128
+  http2: true
+
   model_name: meta-llama/Llama-2-7b-chat-hf
   temperature: 0.7
   max_tokens: 1000
-  system_prompt: ""  # Optional: Set a system prompt for all requests
+  system_prompt: ""
   top_p: 1.0
   frequency_penalty: 0.0
   presence_penalty: 0.0
 
-  # Server configuration
   servers_dir: ./vllm_servers
-  load_balancing_strategy: round_robin  # Options: round_robin, least_connections, random
+  load_balancing_strategy: p2c_cost_aware
+  selection_sample_size: 2
+  max_active_requests: 128
+  max_inflight_cost: 0
 
-  # Health check configuration
-  health_check_interval: 30  # Seconds between health checks
-  max_failures: 5  # Max consecutive failures before marking server as unhealthy
-  allow_unhealthy_fallback: false  # If true, allows routing to unhealthy servers when no healthy ones available
+  health_check_interval: 30
+  max_failures: 5
+  allow_unhealthy_fallback: false
+  success_rate_threshold: 0.5
+  success_rate_window: 10
 
-  # Success rate tracking (for least_connections strategy)
-  success_rate_threshold: 0.5  # Minimum success rate (0.0-1.0) for server to be preferred
-  success_rate_window: 10  # Number of requests needed before success rate is considered reliable
+  adapter_class: OpenAIAdapter
+  adapter_params: {}
 
-  # Model adapter configuration
-  adapter_class: OpenAIAdapter  # Options: OpenAIAdapter, SimpleAdapter, or custom
-  adapter_params: {}  # Additional parameters to pass to adapter
-
-  # Progress tracking
   progress_report_interval: 10
+  streaming: true
+  producer_prefetch: 512
+  writer_queue_size: 1024
+  writer_batch_size: 128
+  writer_flush_interval_ms: 100
+  writer_workers: 1
 
-  # === STREAMING CONFIGURATION ===
-  # Enable streaming mode for pipeline processing
-  streaming: true  # Set to false to use legacy batch mode (preload all data)
+  resume: true
+  resume_backend: bitmap
 
-  # Queue size for backpressure control
-  # - Larger values = more memory usage, but better throughput
-  # - Smaller values = less memory usage, but may slow down processing
-  # - Recommended: 2-3x max_concurrency for optimal balance
-  stream_queue_size: 100  # Default: 100
-
-# Logging Configuration
 logging:
-  level: INFO  # Options: DEBUG, INFO, WARNING, ERROR
+  level: INFO
   format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
   file: logs/batch_runner.log

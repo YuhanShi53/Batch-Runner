@@ -15,7 +15,8 @@ saver:
   class: DirectoryJSONLResultSaver  # Streaming saver with immediate writes
   params:
     output_dir: outputs/results
-    batch_size: 100  # Buffer size for batch writes
+    output_projection: minimal
+    immediate_flush: false
 
 # Batch Runner Configuration
 runner:
@@ -41,8 +42,10 @@ runner:
 
   # Server configuration
   servers_dir: ./vllm_servers
-  load_balancing_strategy: load_aware_round_robin  # Better fairness for 200+ servers with uneven latency
+  load_balancing_strategy: p2c_cost_aware  # Constant-time, cost-aware selection for large server pools
   max_active_requests: 512  # Per-server limit (4096 / 160 servers = 26, set higher for headroom)
+  selection_sample_size: 2
+  max_inflight_cost: 0
 
   # Health check configuration
   health_check_interval: 30
@@ -55,7 +58,15 @@ runner:
 
   # Streaming pipeline settings
   streaming: true
-  stream_queue_size: 2048  # Larger queue for better throughput
+  producer_prefetch: 2048  # Larger queue for better throughput
+  writer_queue_size: 4096
+  writer_batch_size: 128
+  writer_flush_interval_ms: 100
+  writer_workers: 1
+
+  # Resume and multimodal runtime
+  resume_backend: bitmap
+  image_encode_workers: 8
 
   # Model adapter configuration
   adapter_class: OpenAIAdapter

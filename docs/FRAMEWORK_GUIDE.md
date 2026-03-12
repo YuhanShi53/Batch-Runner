@@ -1,618 +1,283 @@
-# vLLM Runner Framework Guide
+# Framework Guide
 
-## Overview
+This guide documents the current architecture and extension points of `vllm_runner`.
 
-This guide explains the refactored vLLM Runner framework, which provides a highly extensible and efficient system for batch inference with custom data loaders and result savers.
+## Core components
 
-## Table of Contents
+- `DataLoader`: yields `LoadResult`
+- `ResultSaver`: persists `SaveResult`
+- `ModelAdapter`: builds requests and parses responses
+- `BatchRunner`: orchestrates loading, routing, HTTP, retries, and saving
+- `VLLMServerManager`: discovers servers and maintains health state
+- `LoadBalancer`: chooses the next server
 
-1. [Architecture](#architecture)
-2. [Streaming Support](#streaming-support)
-3. [Built-in Loaders and Savers](#built-in-loaders-and-savers)
-4. [Customization Hooks](#customization-hooks)
-5. [Creating Custom Components](#creating-custom-components)
-6. [Registration System](#registration-system)
-7. [Examples](#examples)
+## Main data structures
 
----
+### `LoadResult`
 
-## Architecture
+`LoadResult` now carries:
 
-The framework follows a **plugin architecture** with these key components:
+- `messages`
+- `request_id`
+- `additional_data`
+- `resume_key`
+- `dispatch_cost`
 
-### Core Components
+`resume_key` is used by bitmap resume backends.  
+`dispatch_cost` is used by load balancing and admission heuristics.
 
-- **DataLoader**: Abstract base class for all data loaders
-- **ResultSaver**: Abstract base class for all result savers
-- **ModelAdapter**: Adapters for different API formats (OpenAI, Simple, etc.)
-- **BatchRunner**: Main orchestrator for concurrent processing
-- **VLLMServerManager**: Server discovery and health checking
+### `SaveResult`
 
-### Mixin System
+`SaveResult` carries:
 
-The framework uses a **mixin pattern** to provide reusable functionality:
+- `request_id`
+- `model_output`
+- `additional_data`
+- `error`
+- `resume_key`
 
-#### Loader Mixins
+## Execution flow
 
-- **`StreamingLoaderMixin`**: Streaming data loading with on-demand processing
-- **`MessagesBuilderMixin`**: Flexible message construction
-- **`PromptExtractorMixin`**: Customizable prompt extraction
-- **`MultimodalInputMixin`**: Multimodal (text + image) input handling
-- **`JSONLLoaderMixin`**: JSONL-specific parsing logic
+1. `load_config()` reads YAML and loads `custom_modules`.
+2. Loader, saver, and adapter classes are resolved.
+3. `BatchRunner` creates the server manager, load balancer, progress tracker, and shared HTTP client.
+4. The producer reads `LoadResult` objects from the loader.
+5. The scheduler keeps a bounded number of in-flight async requests.
+6. The adapter builds the request payload for the selected server.
+7. Completed responses enter the writer queue as `SaveResult`.
+8. Writer workers batch-save results and update resume/progress state.
 
-#### Saver Mixins
+## Built-in loaders
 
-- **`StreamingSaverMixin`**: Streaming result writing with immediate flush
-- **`OutputFormatterMixin`**: Flexible output formatting
-- **`MultimodalOutputMixin`**: Multimodal output handling
-- **`JSONLSaverMixin`**: JSONL-specific formatting logic
+- `JSONDataLoader`
+- `JSONLDataLoader`
+- `CSVDataLoader`
+- `PromptListLoader`
+- `DirectoryJSONLDataLoader`
+- `MultimodalJSONDataLoader`
+- `MultimodalJSONLDataLoader`
+- `MultimodalDirectoryJSONLDataLoader`
 
----
+## Built-in savers
 
-## Streaming Support
+- `JSONResultSaver`
+- `JSONLResultSaver`
+- `CSVResultSaver`
+- `ConsoleResultSaver`
+- `DirectoryJSONLResultSaver`
 
-### Why Streaming?
+## Built-in adapters
 
-Streaming mode provides several benefits:
+- `OpenAIAdapter`
+- `SimpleAdapter`
 
-1. **Constant Memory Usage**: Processes data on-demand regardless of dataset size
-2. **Immediate Processing**: Starts processing as soon as first data is available
-3. **Better Resource Utilization**: I/O and computation happen concurrently
-4. **Fault Tolerance**: Data is saved immediately, reducing loss on failures
+## Configuration layout
 
-### Enabling Streaming
+Required top-level sections:
 
-Streaming is enabled by default for most loaders/savers:
+- `loader`
+- `saver`
+- `runner`
 
-```yaml
-loader:
-  class: JSONLDataLoader
-  params:
-    file_path: data/input.jsonl
-    streaming: true  # Enable streaming (default)
+Optional:
+
+- `logging`
+- `custom_modules`
+
+## Important runner settings
+
+### Concurrency and HTTP
+
+- `max_concurrency`
+- `request_timeout`
+- `http_max_connections`
+- `http_max_keepalive_connections`
+- `http2`
+
+### Routing and retries
+
+- `load_balancing_strategy`
+- `selection_sample_size`
+- `max_active_requests`
+- `max_inflight_cost`
+- `max_retries`
+- `retry_delay`
+- `allow_unhealthy_fallback`
+
+### Pipeline behavior
+
+- `streaming`
+- `producer_prefetch`
+- `writer_queue_size`
+- `writer_batch_size`
+- `writer_flush_interval_ms`
+- `writer_workers`
+- `progress_report_interval`
+
+### Resume and multimodal
+
+- `resume`
+- `resume_backend`
+- `image_encode_workers`
+
+## Server discovery
+
+The current implementation discovers server marker files under `servers_dir`. Names must match:
+
+`server_<ip>_<port>`
+
+Example:
+
+```text
+servers/
+├── server_10.0.0.1_8000
+├── server_10.0.0.2_8000
+└── server_10.0.0.3_8000
 ```
 
-### Streaming vs Batch Mode
+## Extending loaders
 
-| Feature | Streaming Mode | Batch Mode |
-|---------|---------------|------------|
-| Memory Usage | Constant (queue size) | O(dataset size) |
-| Startup Time | Immediate | Wait for full load |
-| Progress | Shows completed count | Shows percentage |
-| Fault Tolerance | High (data saved as processed) | Lower (data in memory) |
-| Use Case | Large datasets (>10K items) | Small datasets, debugging |
+Subclass `DataLoader` directly for brand-new sources, or extend a built-in JSONL loader for structured text data.
 
----
-
-## Built-in Loaders and Savers
-
-### Built-in Loaders
-
-| Loader | Description | Streaming | Multimodal |
-|--------|-------------|-----------|------------|
-| `JSONDataLoader` | Load from JSON array files | No | Yes |
-| `JSONLDataLoader` | Load from JSONL files | Yes | Yes |
-| `CSVDataLoader` | Load from CSV files | No | No |
-| `PromptListLoader` | Load from config list | No | No |
-| `DirectoryJSONLDataLoader` | Load from directory of JSONL files | Yes | Yes |
-
-### Built-in Savers
-
-| Saver | Description | Streaming | Directory Support |
-|-------|-------------|-----------|-------------------|
-| `JSONResultSaver` | Save to JSON array | Batch | No |
-| `JSONLResultSaver` | Save to JSONL | Yes | No |
-| `CSVResultSaver` | Save to CSV | Yes | No |
-| `ConsoleResultSaver` | Print to console | Yes | No |
-| `DirectoryJSONLResultSaver` | Save to directory structure | Yes | Yes |
-
-### Usage Examples
-
-#### JSONL Loader (Streaming)
-
-```yaml
-loader:
-  class: JSONLDataLoader
-  params:
-    file_path: data/input.jsonl
-    prompt_field: prompt  # Default
-    id_field: id          # Default
-    streaming: true       # Enable streaming
-```
-
-#### Directory JSONL Loader (Streaming)
-
-```yaml
-loader:
-  class: DirectoryJSONLDataLoader
-  params:
-    input_dir: data/conversations
-    file_pattern: conv.jsonl  # Default
-    recursive: true           # Default
-    streaming: true           # Enable streaming
-```
-
-#### JSONL Saver (Streaming)
-
-```yaml
-saver:
-  class: JSONLResultSaver
-  params:
-    output_path: results/output.jsonl
-    append: true           # Default
-    streaming: true        # Default
-    immediate_flush: true  # Default
-```
-
----
-
-## Customization Hooks
-
-The framework provides clear, well-defined hooks for customization at each step of data processing.
-
-### Loader Customization Hooks
-
-#### 1. Prompt Extraction
-
-Override `extract_prompt()` to customize how prompts are extracted from source data:
+### Minimal custom loader
 
 ```python
-class MyLoader(JSONLLoaderMixin, DataLoader):
-    def extract_prompt(self, item):
-        # Try multiple fields in priority order
-        for field in ['prompt', 'question', 'text', 'input']:
-            if field in item:
-                return str(item[field])
-        return None
-```
+from pathlib import Path
 
-#### 2. Message Construction
-
-Override `build_messages()` to customize how prompts are transformed into API messages:
-
-```python
-class MyLoader(MessagesBuilderMixin, DataLoader):
-    def build_messages(self, prompt, additional_data=None):
-        messages = [
-            {"role": "system", "content": "You are a helpful assistant."}
-        ]
-
-        # Add conversation history
-        if additional_data and 'history' in additional_data:
-            messages.extend(additional_data['history'])
-
-        # Add current prompt
-        messages.append({"role": "user", "content": prompt})
-        return messages
-```
-
-#### 3. Image Extraction (Multimodal)
-
-Override `extract_images()` to customize image extraction:
-
-```python
-class MyLoader(MultimodalInputMixin, MultimodalDataLoader):
-    def extract_images(self, item):
-        # Support nested media structure
-        if 'media' in item:
-            return [m['path'] for m in item['media'] if m['type'] == 'image']
-        return super().extract_images(item)
-```
-
-#### 4. Line Parsing (JSONL)
-
-Override `parse_line()` to handle custom JSONL formats:
-
-```python
-class MyLoader(JSONLLoaderMixin, DataLoader):
-    def parse_line(self, line, line_num, source):
-        obj = json.loads(line)
-        # Handle list-format JSONL: [{"key": "value"}]
-        if isinstance(obj, list):
-            return {"items": obj, "id": str(line_num)}
-        return obj
-```
-
-#### 5. Item Filtering
-
-Override `should_skip_item()` to filter items:
-
-```python
-class MyLoader(JSONLLoaderMixin, DataLoader):
-    def should_skip_item(self, item):
-        # Skip items without required fields
-        return 'prompt' not in item or 'id' not in item
-```
-
-### Saver Customization Hooks
-
-#### 1. Output Formatting
-
-Override `format_output()` to customize the output structure:
-
-```python
-class MySaver(OutputFormatterMixin, ResultSaver):
-    def format_output(self, result):
-        content = result.model_output['choices'][0]['message']['content']
-        return {
-            "id": result.request_id,
-            "response": content,
-            "tokens": result.model_output.get('usage', {}).get('total_tokens', 0)
-        }
-```
-
-#### 2. JSON Serialization (JSONL)
-
-Override `serialize_output()` to customize JSON serialization:
-
-```python
-class MySaver(JSONLSaverMixin, ResultSaver):
-    def serialize_output(self, output_data):
-        return json.dumps(output_data, ensure_ascii=False, indent=None)
-```
-
-#### 3. Result Filtering
-
-Override `should_save_result()` to filter results:
-
-```python
-class MySaver(StreamingSaverMixin, ResultSaver):
-    def should_save_result(self, result):
-        # Only save successful results
-        return result.error is None
-```
-
----
-
-## Creating Custom Components
-
-### Option 1: In-Project Custom Components
-
-Create your custom loader/saver in the appropriate directory:
-
-```python
-# src/loaders/my_custom_loader.py
 from src.loaders.base import DataLoader, LoadResult
-from src.loaders.jsonl_mixin import JSONLLoaderMixin
 
-class MyCustomLoader(JSONLLoaderMixin, DataLoader):
+
+class TextFileLoader(DataLoader):
     def _initialize(self):
-        self.file_path = Path(self.config['file_path'])
+        self.path = Path(self.config["file_path"])
 
     def load(self):
-        # Your loading logic
-        pass
+        with self.path.open("r", encoding="utf-8") as handle:
+            for index, line in enumerate(handle, start=1):
+                yield LoadResult(
+                    messages=[{"role": "user", "content": line.strip()}],
+                    request_id=f"line_{index}",
+                )
 ```
 
-Then use it in your config:
+### JSONL customization hooks
 
-```yaml
-loader:
-  class: MyCustomLoader
-  params:
-    file_path: data/input.jsonl
-```
+`JSONLLoaderMixin` provides the main override points:
 
-### Option 2: Out-of-Project Custom Components (Recommended)
+- `parse_line()`
+- `should_skip_item()`
+- `extract_request_id()`
+- `extract_prompt()`
+- `extract_additional_data()`
 
-Create your custom components anywhere and use the registration system:
+See [JSONL_CUSTOMIZATION.md](/Users/yuhan/code/vllm_runner/docs/JSONL_CUSTOMIZATION.md).
+
+## Extending savers
+
+Subclass `ResultSaver` when you need a custom storage backend.
+
+### Minimal custom saver
 
 ```python
-# custom_components.py
-from src.loaders.base import DataLoader, LoadResult
-from src.utils.registry import register_loader
+import json
+from pathlib import Path
 
-@register_loader
-class MyCustomLoader(DataLoader):
+from src.savers.base import ResultSaver, SaveResult
+
+
+class MySaver(ResultSaver):
     def _initialize(self):
-        # Your initialization
-        pass
+        self.path = Path(self.config["output_path"])
+        self.path.parent.mkdir(parents=True, exist_ok=True)
 
-    def load(self):
-        # Your loading logic
-        yield LoadResult(...)
+    def save(self, result: SaveResult):
+        with self.path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(self.format_output(result), ensure_ascii=False) + "\n")
 ```
 
-Then either:
+If your saver can persist efficiently in groups, override `save_batch()` as well.
 
-1. **Auto-register via config**:
-```yaml
-custom_modules:
-  - custom_components.py
+## Registration system
 
-loader:
-  class: MyCustomLoader
-  params:
-    # ...
-```
-
-2. **Import before running**:
-```python
-import custom_components  # Registers the loaders/savers
-from src.cli import main
-main()
-```
-
----
-
-## Registration System
-
-The registration system allows you to use custom loaders/savers without modifying the project source code.
-
-### Using Decorators
+You can register custom loaders and savers without modifying core source files.
 
 ```python
 from src.utils.registry import register_loader, register_saver
-
-@register_loader
-class MyCustomLoader(DataLoader):
-    # Implementation
-    pass
-
-@register_saver
-class MyCustomSaver(ResultSaver):
-    # Implementation
-    pass
 ```
 
-### Registration Functions
-
-```python
-from src.utils.registry import register_loader_class, register_saver_class
-
-class MyCustomLoader(DataLoader):
-    pass
-
-# Register with a custom name
-register_loader_class('CustomLoader', MyCustomLoader)
-```
-
-### Listing Registered Components
-
-```python
-from src.utils.registry import list_registered_loaders, list_registered_savers
-
-print("Loaders:", list_registered_loaders())
-print("Savers:", list_registered_savers())
-```
-
----
-
-## Examples
-
-### Example 1: Custom JSONL Loader with Multi-Field Prompt Extraction
-
-```python
-@register_loader
-class MultiFieldJSONLLoader(JSONLLoaderMixin, DataLoader):
-    def _initialize(self):
-        self.file_path = Path(self.config['file_path'])
-        self.prompt_fields = self.config.get('prompt_fields', ['prompt', 'question', 'text'])
-
-    def extract_prompt(self, item):
-        for field in self.prompt_fields:
-            if field in item:
-                return str(item[field])
-        return None
-
-    def load(self):
-        with open(self.file_path) as f:
-            for line_num, line in enumerate(f, 1):
-                result = self.process_line_to_load_result(
-                    line=line.strip(),
-                    line_num=line_num,
-                    source=str(self.file_path),
-                    default_id=f"req_{line_num}"
-                )
-                if result:
-                    yield result
-```
-
-### Example 2: Custom Saver with Simplified Output
-
-```python
-@register_saver
-class SimpleJSONLSaver(JSONLSaverMixin, ResultSaver):
-    def _initialize(self):
-        self.output_path = Path(self.config['output_path'])
-        self.output_path.parent.mkdir(parents=True, exist_ok=True)
-        self.file = open(self.output_path, 'a')
-        self._lock = threading.Lock()
-
-    def format_result(self, result):
-        content = result.model_output['choices'][0]['message']['content']
-        return {
-            'id': result.request_id,
-            'response': content
-        }
-
-    def save(self, result):
-        line = self.process_result_to_line(result)
-        with self._lock:
-            self.file.write(line + '\n')
-            self.file.flush()
-
-    def cleanup(self):
-        with self._lock:
-            self.file.close()
-```
-
-### Example 3: Chat Messages with History
-
-```python
-@register_loader
-class ChatLoader(MessagesBuilderMixin, DataLoader):
-    def build_messages(self, prompt, additional_data=None):
-        messages = []
-
-        # Add system prompt
-        if self.config.get('system_prompt'):
-            messages.append({
-                "role": "system",
-                "content": self.config['system_prompt']
-            })
-
-        # Add conversation history
-        if additional_data and 'history' in additional_data:
-            messages.extend(additional_data['history'])
-
-        # Add current prompt
-        messages.append({"role": "user", "content": prompt})
-        return messages
-
-    def _initialize(self):
-        self.file_path = Path(self.config['file_path'])
-        with open(self.file_path) as f:
-            self.conversations = json.load(f)
-
-    def load(self):
-        for idx, conv in enumerate(self.conversations, 1):
-            messages = self.build_messages(
-                conv['prompt'],
-                {'history': conv.get('history', [])}
-            )
-            yield LoadResult(
-                messages=messages,
-                request_id=conv.get('id', f"conv_{idx}")
-            )
-```
-
-### Example 4: Multimodal Loader with Custom Image Handling
-
-```python
-@register_loader
-class CustomMultimodalLoader(MultimodalInputMixin, MultimodalDataLoader):
-    def extract_images(self, item):
-        # Support multiple image field formats
-        if 'image' in item:
-            return [item['image']] if isinstance(item['image'], str) else item['image']
-        if 'images' in item:
-            return item['images'] if isinstance(item['images'], list) else [item['images']]
-        if 'media' in item:
-            return [m['path'] for m in item['media'] if m.get('type') == 'image']
-        return None
-
-    def _initialize(self):
-        super()._initialize()
-        self.file_path = Path(self.config['file_path'])
-        with open(self.file_path) as f:
-            self.data = json.load(f)
-
-    def load(self):
-        for idx, item in enumerate(self.data, 1):
-            prompt = item.get('prompt', '')
-            images = self.extract_images(item)
-            yield self._create_multimodal_result(
-                text=prompt,
-                images=images,
-                request_id=item.get('id', f"mm_{idx}")
-            )
-```
-
----
-
-## Complete Example Config
+Then preload your module from YAML:
 
 ```yaml
-# config.yaml
-
-# Auto-register custom components
 custom_modules:
-  - custom_components.py
-
-loader:
-  class: MultiFieldJSONLLoader
-  params:
-    file_path: data/conversations.jsonl
-    prompt_fields:
-      - prompt
-      - question
-      - text
-    streaming: true
-
-saver:
-  class: SimpleJSONLSaver
-  params:
-    output_path: results/output.jsonl
-
-runner:
-  max_concurrency: 20
-  model_name: "meta-llama/Llama-3-8b"
-  servers_dir: ./servers
-  load_balancing_strategy: round_robin
-  temperature: 0.7
-  max_tokens: 1000
+  - examples/custom_components.py
 ```
 
----
+Resolution order:
 
-## Migration Guide
+1. Registered custom class
+2. Built-in class map
+3. Auto-import from `src.loaders.*` or `src.savers.*`
 
-### From Old Code to New Framework
+## Streaming and batch mode
 
-If you have existing custom loaders/savers, here's how to migrate:
+`streaming: true` is still the default and recommended mode. Both streaming and batch now share the same bounded scheduler and writer pipeline in `BatchRunner`; the difference is mainly how the loader behaves.
 
-#### Old Loader (Batch Mode)
+Choose streaming when:
 
-```python
-# Before
-class MyLoader(DataLoader):
-    def _initialize(self):
-        with open(self.config['file']) as f:
-            self.data = json.load(f)
+- the dataset is large
+- you want steady memory usage
+- you want outputs to appear continuously
 
-    def load(self):
-        for item in self.data:
-            yield LoadResult(
-                messages=[{"role": "user", "content": item['prompt']}],
-                request_id=item['id']
-            )
-```
+Choose batch only when:
 
-#### New Loader (Streaming Mode)
+- the loader naturally precomputes a small dataset
+- you are debugging or prototyping
 
-```python
-# After
-class MyLoader(StreamingLoaderMixin, DataLoader):
-    def _initialize(self):
-        self._initialize_streaming()
-        self.file_path = Path(self.config['file_path'])
+## Resume behavior
 
-    def _discover_sources(self):
-        return [self.file_path]
+Resume is saver-backed plus optional bitmap acceleration.
 
-    def _process_source(self, source):
-        with open(source) as f:
-            data = json.load(f)
-        for item in data:
-            yield LoadResult(
-                messages=[{"role": "user", "content": item['prompt']}],
-                request_id=item['id']
-            )
-```
+### `legacy_output_scan`
 
----
+- Works with any saver that implements `is_completed()`
+- Scans output state using `request_id`
 
-## Best Practices
+### `bitmap`
 
-1. **Use Streaming for Large Datasets**: Enable streaming mode for datasets with >10K items
-2. **Leverage Mixins**: Use provided mixins instead of rewriting common functionality
-3. **Override Specific Hooks**: Only override the hooks you need, not entire methods
-4. **Thread Safety**: Ensure your custom components are thread-safe
-5. **Resource Cleanup**: Always implement `cleanup()` to release resources
-6. **Error Handling**: Handle errors gracefully and log appropriately
+- Best for JSONL and directory JSONL loaders
+- Uses exact `(source_file, line_num, item_idx)` tracking
 
----
+If a request has no `resume_key`, the runtime falls back to legacy checks automatically.
 
-## API Reference
+## Output formats
 
-See the individual module documentation for detailed API references:
+Built-in JSONL savers support:
 
-- [src/loaders/base.py](../src/loaders/base.py) - DataLoader base class
-- [src/savers/base.py](../src/savers/base.py) - ResultSaver base class
-- [src/loaders/streaming_mixin.py](../src/loaders/streaming_mixin.py) - Streaming mixins
-- [src/savers/streaming_mixin.py](../src/savers/streaming_mixin.py) - Streaming mixins
-- [src/loaders/jsonl_mixin.py](../src/loaders/jsonl_mixin.py) - JSONL mixins
-- [src/savers/jsonl_mixin.py](../src/savers/jsonl_mixin.py) - JSONL mixins
-- [src/utils/registry.py](../src/utils/registry.py) - Registration system
-- [src/utils/config.py](../src/utils/config.py) - Configuration loading
+- `output_projection: full`
+- `output_projection: minimal`
+- `output_fields`
+- `include_timestamp`
+
+This is the main knob for reducing serialization and disk pressure during rollout.
+
+## Multimodal architecture
+
+Multimodal loaders extend `MultimodalDataLoader`, which handles:
+
+- image path resolution
+- MIME-type detection
+- optional base64 encoding
+- thread-pooled image encoding
+- OpenAI-compatible message formatting
+
+For details, see [MULTIMODAL.md](/Users/yuhan/code/vllm_runner/docs/MULTIMODAL.md).
+
+## Benchmark and soak utilities
+
+The repository includes:
+
+- `scripts/benchmark_load_balancer.py`
+- `scripts/benchmark_writer.py`
+- `scripts/soak_openai_stub.py`
+
+These are the fastest way to validate performance regressions after runtime changes.

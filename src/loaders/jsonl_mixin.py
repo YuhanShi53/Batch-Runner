@@ -282,10 +282,17 @@ class JSONLLoaderMixin(PromptExtractorMixin):
                 else:
                     messages = [{"role": "user", "content": prompt}]
 
+                if hasattr(self, 'estimate_dispatch_cost'):
+                    dispatch_cost = self.estimate_dispatch_cost(prompt, additional_data)
+                else:
+                    dispatch_cost = float(max(1, len(prompt or "") // 4))
+
                 yield LoadResult(
                     messages=messages,
                     request_id=request_id,
-                    additional_data=additional_data or None
+                    additional_data=additional_data or None,
+                    resume_key=(str(source), line_num, idx),
+                    dispatch_cost=dispatch_cost,
                 )
         except Exception as e:
             # Catch unexpected errors and log them, but don't stop iteration

@@ -6,6 +6,7 @@ import logging
 
 from src.batch_runner import BatchRunner, BatchConfig, BatchStats
 from src.loaders.base import LoadResult
+from src.savers.base import SaveResult
 
 
 class StubLoader:
@@ -102,3 +103,66 @@ def test_run_batch_async_refills_slots_when_streaming_disabled():
         assert refill_happened is True
 
     asyncio.run(exercise_runner())
+
+
+def test_flush_completion_batch_updates_stats_and_resume():
+    """Writer batch flush should persist results, update stats, and mark resume state."""
+
+    class StubBatchSaver:
+        def __init__(self):
+            self.saved_batches = []
+
+        def save_batch(self, results):
+            self.saved_batches.append([result.request_id for result in results])
+
+    class StubResumeStore:
+        def __init__(self):
+            self.marked = []
+
+        def mark_many(self, items):
+            self.marked.extend(list(items))
+
+    class StubProgress:
+        def __init__(self):
+            self.counts = []
+
+        def update(self, count):
+            self.counts.append(count)
+
+    async def exercise():
+        runner = object.__new__(BatchRunner)
+        runner.config = BatchConfig(writer_workers=1)
+        runner.saver = StubBatchSaver()
+        runner.resume_store = StubResumeStore()
+        runner.progress_tracker = StubProgress()
+        runner.stats = BatchStats()
+        runner._writer_executor = None
+        runner._ensure_runtime_state()
+
+        results = [
+            SaveResult(
+                request_id="req-1",
+                model_output={"usage": {"total_tokens": 7}},
+                resume_key=("source", 1, 0),
+            ),
+            SaveResult(
+                request_id="req-2",
+                model_output={"usage": {"total_tokens": 3}},
+                resume_key=("source", 2, 0),
+            ),
+        ]
+
+        await runner._flush_completion_batch(results)
+
+        assert runner.saver.saved_batches == [["req-1", "req-2"]]
+        assert runner.resume_store.marked == [
+            ("req-1", ("source", 1, 0)),
+            ("req-2", ("source", 2, 0)),
+        ]
+        assert runner.progress_tracker.counts == [2]
+        assert runner.stats.completed_requests == 2
+        assert runner.stats.total_tokens == 10
+
+        runner._writer_executor.shutdown(wait=True)
+
+    asyncio.run(exercise())

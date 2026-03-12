@@ -364,7 +364,9 @@ class MultimodalJSONLDataLoader(ChunkedLoaderMixin, StreamingLoaderMixin, JSONLL
                         text=prompt,
                         images=images,
                         request_id=str(request_id),
-                        additional_data=additional_data or None
+                        additional_data=additional_data or None,
+                        resume_key=(str(source), line_num, item_idx),
+                        dispatch_cost=self.estimate_multimodal_dispatch_cost(prompt, images, additional_data),
                     )
 
     def _on_source_start(self, source: Path):
@@ -469,7 +471,8 @@ class MultimodalJSONLDataLoader(ChunkedLoaderMixin, StreamingLoaderMixin, JSONLL
                         text=prompt,
                         images=images,
                         request_id=str(request_id),
-                        additional_data=additional_data or None
+                        additional_data=additional_data or None,
+                        dispatch_cost=self.estimate_multimodal_dispatch_cost(prompt, images, additional_data),
                     )
                 except Exception as e:
                     logger.error(

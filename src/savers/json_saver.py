@@ -7,6 +7,7 @@ Supports chunked output via ChunkedSaverMixin.
 import json
 import logging
 from typing import Dict, Any
+from pathlib import Path
 
 from .base import ResultSaver, SaveResult
 from .streaming_mixin import BatchWriterMixin, OutputFormatterMixin
@@ -50,6 +51,12 @@ class JSONResultSaver(ChunkedSaverMixin, BatchWriterMixin, OutputFormatterMixin,
         self.output_path = self._get_chunked_output_path()
 
         self.pretty = self.config.get('pretty_print', True)
+        self.output_projection = self.config.get('output_projection', 'full')
+        self.output_fields = self.config.get('output_fields')
+        self.include_timestamp = self.config.get(
+            'include_timestamp',
+            self.output_projection == 'full'
+        )
 
         # Create output directory if needed
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -80,6 +87,20 @@ class JSONResultSaver(ChunkedSaverMixin, BatchWriterMixin, OutputFormatterMixin,
         """
         formatted_data = self._format_result(result)
         self._add_to_batch(formatted_data)
+
+    def save_batch(self, results):
+        """Buffer multiple formatted results at once."""
+        if not results:
+            return
+
+        formatted_batch = [self._format_result(result) for result in results]
+        should_flush = False
+        with self._batch_lock:
+            self._batch_buffer.extend(formatted_batch)
+            should_flush = len(self._batch_buffer) >= self.batch_size
+
+        if should_flush:
+            self._flush_batch()
 
     def _flush_batch(self) -> None:
         """
@@ -143,3 +164,7 @@ class JSONResultSaver(ChunkedSaverMixin, BatchWriterMixin, OutputFormatterMixin,
             logger.error(f"Error loading completed IDs: {e}")
 
         return completed_ids
+
+    def get_resume_store_path(self) -> str:
+        """Return the directory used for bitmap resume state."""
+        return str(Path(f"{self.output_path}.resume"))

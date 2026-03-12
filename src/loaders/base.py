@@ -4,7 +4,7 @@ DataLoader base module.
 Provides abstract base class for all data loaders.
 """
 from abc import ABC, abstractmethod
-from typing import Iterator, Dict, Any, Optional, List
+from typing import Iterator, Dict, Any, Optional, List, Tuple
 from dataclasses import dataclass
 
 
@@ -17,10 +17,14 @@ class LoadResult:
         messages: OpenAI API format messages
         request_id: Unique identifier for the request
         additional_data: Any extra data to be saved with results
+        resume_key: Stable tuple for bitmap-style resume backends
+        dispatch_cost: Estimated cost used for admission and load balancing
     """
     messages: list
     request_id: str
     additional_data: Optional[Dict[str, Any]] = None
+    resume_key: Optional[Tuple[str, int, int]] = None
+    dispatch_cost: Optional[float] = None
 
 
 class DataLoader(ABC):
@@ -141,6 +145,27 @@ class DataLoader(ABC):
         """
         prompt_field = getattr(self, 'prompt_field', 'prompt')
         return item.get(prompt_field)
+
+    def estimate_dispatch_cost(
+        self,
+        prompt: Optional[str],
+        additional_data: Optional[Dict[str, Any]] = None
+    ) -> float:
+        """
+        Estimate dispatch cost for routing heuristics.
+
+        This lightweight heuristic prefers using upstream metadata when present
+        and otherwise falls back to prompt size.
+        """
+        additional_data = additional_data or {}
+
+        for key in ("dispatch_cost", "estimated_tokens", "input_tokens", "prompt_tokens"):
+            value = additional_data.get(key)
+            if isinstance(value, (int, float)) and value > 0:
+                return float(value)
+
+        prompt_text = prompt or ""
+        return float(max(1, len(prompt_text) // 4))
 
     # ===== Standard dunder methods =====
 

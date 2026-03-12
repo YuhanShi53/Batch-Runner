@@ -8,6 +8,7 @@ import tempfile
 from pathlib import Path
 import pytest
 
+from src.loaders.directory_jsonl_loader import MultimodalDirectoryJSONLDataLoader
 from src.loaders.jsonl_loader import MultimodalJSONLDataLoader
 from src.loaders.json_loader import MultimodalJSONDataLoader
 
@@ -249,6 +250,46 @@ class TestMultimodalBase:
 
         assert len(processed) == 1
         assert processed[0] == already_encoded  # Should not change
+
+
+class TestMultimodalDirectoryJSONLDataLoader:
+    """Test multimodal directory JSONL behavior."""
+
+    def test_encode_image_relative_to_source_dir(self, tmp_path):
+        """Relative image paths should resolve correctly during base64 encoding."""
+        shard_dir = tmp_path / "shard_000"
+        shard_dir.mkdir(parents=True)
+        image_path = shard_dir / "sample.png"
+        image_path.write_bytes(
+            b"\x89PNG\r\n\x1a\n"
+            b"\x00\x00\x00\rIHDR"
+            b"\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00"
+            b"\x90wS\xde"
+            b"\x00\x00\x00\x0cIDATx\x9cc`\x00\x00\x00\x02\x00\x01"
+            b"\xe2!\xbc3"
+            b"\x00\x00\x00\x00IEND\xaeB`\x82"
+        )
+        (shard_dir / "conv.jsonl").write_text(
+            '{"id": "1", "prompt": "describe", "image": "sample.png"}\n',
+            encoding="utf-8",
+        )
+
+        loader = MultimodalDirectoryJSONLDataLoader(
+            {
+                "input_dir": str(tmp_path),
+                "streaming": True,
+                "encode_images": True,
+                "use_source_dir_as_base": True,
+            }
+        )
+
+        results = list(loader)
+
+        assert len(results) == 1
+        assert results[0].images is not None
+        content = results[0].messages[0]["content"]
+        assert content[0]["type"] == "image_url"
+        assert content[0]["image_url"]["url"].startswith("data:image/png;base64,")
 
 
 if __name__ == "__main__":

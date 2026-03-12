@@ -32,6 +32,7 @@ setup(
     install_requires=[
         "requests>=2.31.0",
         "pyyaml>=6.0.1",
+        "httpx[http2]>=0.24.0",
     ],
     extras_require={
         "dev": [
@@ -39,6 +40,9 @@ setup(
             "pytest-cov>=4.1.0",
             "black>=23.7.0",
             "flake8>=6.1.0",
+        ],
+        "perf": [
+            "orjson>=3.10.0",
         ],
     },
     entry_points={

@@ -59,42 +59,18 @@ class CSVResultSaver(ResultSaver):
 
         Thread-safe for concurrent writes.
         """
+        self.save_batch([result])
+
+    def save_batch(self, results):
+        """Write a batch of rows while flushing only once."""
+        if not results:
+            return
+
+        rows = [self._build_row(result) for result in results]
+
         with self._lock:
             self._ensure_initialized()
-
-            # Extract content from model output
-            content = ''
-            if result.model_output:
-                choices = result.model_output.get('choices', [])
-                if choices and len(choices) > 0:
-                    message = choices[0].get('message', {})
-                    content = message.get('content', '')
-
-            # Extract usage info
-            usage = result.model_output.get('usage', {}) if result.model_output else {}
-
-            # Build row data
-            row = {
-                'request_id': result.request_id,
-                'content': content,
-                'finish_reason': choices[0].get('finish_reason', '') if choices else '',
-                'total_tokens': usage.get('total_tokens', ''),
-            }
-
-            # Add custom fields if specified
-            if self.fields:
-                row_data = {}
-                for field in self.fields:
-                    if field == 'request_id':
-                        row_data[field] = result.request_id
-                    elif field == 'content':
-                        row_data[field] = content
-                    else:
-                        # Try to extract from model_output
-                        row_data[field] = str(result.model_output.get(field, '') if result.model_output else '')
-                row = row_data
-
-            self._writer.writerow(row)
+            self._writer.writerows(rows)
             self._file.flush()
 
     def cleanup(self):
@@ -133,3 +109,31 @@ class CSVResultSaver(ResultSaver):
             logger.error(f"Error loading completed IDs: {e}")
 
         return completed_ids
+
+    def _build_row(self, result: SaveResult) -> Dict[str, Any]:
+        """Build a CSV row from a save result."""
+        choices = result.model_output.get('choices', []) if result.model_output else []
+        first_choice = choices[0] if choices else {}
+        message = first_choice.get('message', {}) if isinstance(first_choice, dict) else {}
+        content = message.get('content', '')
+        usage = result.model_output.get('usage', {}) if result.model_output else {}
+
+        row = {
+            'request_id': result.request_id,
+            'content': content,
+            'finish_reason': first_choice.get('finish_reason', '') if isinstance(first_choice, dict) else '',
+            'total_tokens': usage.get('total_tokens', ''),
+        }
+
+        if self.fields:
+            row_data = {}
+            for field in self.fields:
+                if field == 'request_id':
+                    row_data[field] = result.request_id
+                elif field == 'content':
+                    row_data[field] = content
+                else:
+                    row_data[field] = str(result.model_output.get(field, '') if result.model_output else '')
+            row = row_data
+
+        return row

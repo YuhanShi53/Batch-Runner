@@ -6,6 +6,7 @@ Each result is written as a separate JSON object on its own line.
 Supports streaming mode with immediate write-back.
 Supports chunked output via ChunkedSaverMixin.
 """
+from pathlib import Path
 import threading
 import logging
 
@@ -64,14 +65,20 @@ class JSONLResultSaver(ChunkedSaverMixin, JSONLSaverMixin, ResultSaver):
 
         self.append = self.config.get('append', True)
         self.streaming = self.config.get('streaming', True)
-        self.immediate_flush = self.config.get('immediate_flush', True)
+        self.immediate_flush = self.config.get('immediate_flush', False)
+        self.output_projection = self.config.get('output_projection', 'full')
+        self.output_fields = self.config.get('output_fields')
+        self.include_timestamp = self.config.get(
+            'include_timestamp',
+            self.output_projection == 'full'
+        )
 
         # Create output directory if needed
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Open file in append mode
         mode = 'a' if self.append else 'w'
-        self.file = open(self.output_path, mode, encoding='utf-8')
+        self.file = open(self.output_path, mode, encoding='utf-8', buffering=1024 * 1024)
         self._lock = threading.Lock()
 
         if self.streaming:
@@ -85,13 +92,19 @@ class JSONLResultSaver(ChunkedSaverMixin, JSONLSaverMixin, ResultSaver):
         Thread-safe for concurrent writes.
         Uses the mixin's process_result_to_line template method.
         """
-        # Use the mixin's template method for processing
-        line = self.process_result_to_line(result)
+        self.save_batch([result])
+
+    def save_batch(self, results):
+        """Save multiple results with one lock acquisition and optional flush."""
+        if not results:
+            return
+
+        lines = [self.process_result_to_line(result) for result in results]
 
         with self._lock:
-            self.file.write(line + '\n')
+            self.file.write('\n'.join(lines) + '\n')
             if self.immediate_flush:
-                self.file.flush()  # Ensure data is written immediately
+                self.file.flush()
 
     def cleanup(self):
         """Close the file."""
@@ -141,3 +154,7 @@ class JSONLResultSaver(ChunkedSaverMixin, JSONLSaverMixin, ResultSaver):
             # Return empty set on error - fail open to allow processing
 
         return completed_ids
+
+    def get_resume_store_path(self) -> str:
+        """Return the directory used for bitmap resume state."""
+        return str(Path(f"{self.output_path}.resume"))

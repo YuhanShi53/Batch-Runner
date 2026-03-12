@@ -68,7 +68,8 @@ class PromptListLoader(DataLoader):
                 yield LoadResult(
                     messages=[{"role": "user", "content": item['prompt']}],
                     request_id=item['id'],
-                    additional_data=additional_data or None
+                    additional_data=additional_data or None,
+                    dispatch_cost=self.estimate_dispatch_cost(item['prompt'], additional_data),
                 )
             except Exception as e:
                 logger.error(

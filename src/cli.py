@@ -112,6 +112,8 @@ def main():
 
     # Initialize loader
     try:
+        if 'image_encode_workers' in config['runner'] and 'image_encode_workers' not in config['loader'].get('params', {}):
+            config['loader']['params']['image_encode_workers'] = config['runner']['image_encode_workers']
         loader_class = get_loader_class(config['loader']['class'])
         loader = loader_class(config['loader']['params'])
         logger.info(f"Loaded data loader: {config['loader']['class']}")

@@ -4,7 +4,7 @@ ResultSaver base module.
 Provides abstract base class for all result savers.
 """
 from abc import ABC, abstractmethod
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 from dataclasses import dataclass
 
 
@@ -18,11 +18,13 @@ class SaveResult:
         model_output: Complete vLLM response
         additional_data: Extra data from the loader
         error: Error message if the request failed
+        resume_key: Stable tuple used by bitmap-style resume backends
     """
     request_id: str
     model_output: Dict[str, Any]
     additional_data: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
+    resume_key: Optional[Tuple[str, int, int]] = None
 
 
 class ResultSaver(ABC):
@@ -196,6 +198,12 @@ class ResultSaver(ABC):
         Called after batch processing completes.
         """
         pass
+
+    def get_resume_store_path(self) -> Optional[str]:
+        """
+        Return a path for saver-managed resume artifacts, if available.
+        """
+        return None
 
     def __enter__(self):
         """Context manager entry."""

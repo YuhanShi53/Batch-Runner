@@ -7,6 +7,7 @@ into corresponding output files.
 """
 import json
 import logging
+from collections import OrderedDict
 from pathlib import Path
 
 from .base import ResultSaver, SaveResult
@@ -46,9 +47,16 @@ class DirectoryJSONLResultSaver(StreamingSaverMixin, JSONLSaverMixin, ResultSave
     def _initialize(self):
         """Initialize directory JSONL saver."""
         self.output_dir = Path(self.config['output_dir'])
-        self.output_file_pattern = self.config.get('output_file_pattern', None)
+        self.output_file_pattern = self.config.get('output_file_pattern', 'result.jsonl')
         self.preserve_structure = self.config.get('preserve_structure', True)
         self.output_filename = self.config.get('output_filename', None)
+        self.output_projection = self.config.get('output_projection', 'full')
+        self.output_fields = self.config.get('output_fields')
+        self.include_timestamp = self.config.get(
+            'include_timestamp',
+            self.output_projection == 'full'
+        )
+        self.max_open_files = max(1, self.config.get('max_open_files', 128))
 
         # Create output directory
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -56,8 +64,8 @@ class DirectoryJSONLResultSaver(StreamingSaverMixin, JSONLSaverMixin, ResultSave
         # Initialize streaming configuration from StreamingSaverMixin
         self._initialize_streaming()
 
-        # Track open files: {output_path: file_handle}
-        self._files = {}
+        # Track open files in LRU order: {output_path: file_handle}
+        self._files = OrderedDict()
 
     def _get_output_path(self, result: SaveResult) -> Path:
         """
@@ -122,10 +130,23 @@ class DirectoryJSONLResultSaver(StreamingSaverMixin, JSONLSaverMixin, ResultSave
             # Create parent directory if needed
             output_path.parent.mkdir(parents=True, exist_ok=True)
             # Open file in append mode
-            self._files[output_path] = open(output_path, 'a', encoding='utf-8')
+            self._files[output_path] = open(output_path, 'a', encoding='utf-8', buffering=1024 * 1024)
+            self._evict_file_handles_if_needed()
 
         file_handle = self._files[output_path]
+        self._files.move_to_end(output_path)
         file_handle.write(formatted_data + '\n')
+
+    def _write_many(self, output_path: Path, formatted_lines) -> None:
+        """Write many lines to a file handle with one append call."""
+        if output_path not in self._files:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            self._files[output_path] = open(output_path, 'a', encoding='utf-8', buffering=1024 * 1024)
+            self._evict_file_handles_if_needed()
+
+        file_handle = self._files[output_path]
+        self._files.move_to_end(output_path)
+        file_handle.write('\n'.join(formatted_lines) + '\n')
 
     def _flush(self, output_path: Path):
         """
@@ -146,6 +167,22 @@ class DirectoryJSONLResultSaver(StreamingSaverMixin, JSONLSaverMixin, ResultSave
         Uses the StreamingSaverMixin template method.
         """
         self._stream_save(result)
+
+    def save_batch(self, results):
+        """Group results by output path to reduce lock and flush overhead."""
+        if not results:
+            return
+
+        grouped = {}
+        for result in results:
+            output_path = self._get_output_path(result)
+            grouped.setdefault(output_path, []).append(self._format_result(result))
+
+        with self._lock:
+            for output_path, formatted_lines in grouped.items():
+                self._write_many(output_path, formatted_lines)
+                if self.immediate_flush:
+                    self._flush(output_path)
 
     def cleanup(self):
         """Close all open files."""
@@ -208,3 +245,14 @@ class DirectoryJSONLResultSaver(StreamingSaverMixin, JSONLSaverMixin, ResultSave
             logger.error(f"Error loading completed IDs: {e}")
 
         return completed_ids
+
+    def get_resume_store_path(self) -> str:
+        """Return the directory used for bitmap resume state."""
+        return str(self.output_dir / '.resume')
+
+    def _evict_file_handles_if_needed(self):
+        """Close least-recently-used file handles when the pool grows too large."""
+        while len(self._files) > self.max_open_files:
+            _, file_handle = self._files.popitem(last=False)
+            if not file_handle.closed:
+                file_handle.close()
