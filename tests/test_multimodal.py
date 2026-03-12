@@ -69,10 +69,10 @@ class TestMultimodalJSONLDataLoader:
             # Check message structure
             content = results[0].messages[0]["content"]
             assert len(content) == 2
-            assert content[0]["type"] == "text"
-            assert content[0]["text"] == "Describe this"
-            assert content[1]["type"] == "image_url"
-            assert content[1]["image_url"]["url"] == "photo.jpg"
+            assert content[0]["type"] == "image_url"
+            assert content[0]["image_url"]["url"] == "file://./photo.jpg"
+            assert content[1]["type"] == "text"
+            assert content[1]["text"] == "Describe this"
         finally:
             Path(temp_path).unlink()
 
@@ -100,9 +100,12 @@ class TestMultimodalJSONLDataLoader:
             # Check message structure
             content = results[0].messages[0]["content"]
             assert len(content) == 3
-            assert content[0]["type"] == "text"
+            assert content[0]["type"] == "image_url"
+            assert content[0]["image_url"]["url"] == "file://./a.jpg"
             assert content[1]["type"] == "image_url"
-            assert content[2]["type"] == "image_url"
+            assert content[1]["image_url"]["url"] == "file://./b.png"
+            assert content[2]["type"] == "text"
+            assert content[2]["text"] == "Compare these"
         finally:
             Path(temp_path).unlink()
 
@@ -223,12 +226,12 @@ class TestMultimodalBase:
         content = loader._create_multimodal_content("Describe this", ["img1.jpg", "img2.png"])
 
         assert len(content) == 3
-        assert content[0]["type"] == "text"
-        assert content[0]["text"] == "Describe this"
+        assert content[0]["type"] == "image_url"
+        assert content[0]["image_url"]["url"] == "file://./img1.jpg"
         assert content[1]["type"] == "image_url"
-        assert content[1]["image_url"]["url"] == "img1.jpg"
-        assert content[2]["type"] == "image_url"
-        assert content[2]["image_url"]["url"] == "img2.png"
+        assert content[1]["image_url"]["url"] == "file://./img2.png"
+        assert content[2]["type"] == "text"
+        assert content[2]["text"] == "Describe this"
 
     def test_base64_image_already_encoded(self):
         """Test that already base64-encoded images are not re-encoded."""

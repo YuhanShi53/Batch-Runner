@@ -1,6 +1,7 @@
 """
 Load balancer module for distributing requests across vLLM servers.
 """
+import math
 import random
 import threading
 import logging
@@ -17,6 +18,7 @@ class LoadBalancer:
     - round_robin: Distribute requests sequentially
     - least_connections: Send to server with fewest active requests (success rate aware)
     - adaptive_round_robin: Round-robin with intelligent skipping for congested/underperforming servers
+    - load_aware_round_robin: Round-robin with dynamic per-server load balancing
     - random: Distribute randomly
 
     Features:
@@ -65,7 +67,13 @@ class LoadBalancer:
         self.logger = logging.getLogger(__name__)
 
         # Validate strategy
-        valid_strategies = ['round_robin', 'least_connections', 'adaptive_round_robin', 'random']
+        valid_strategies = [
+            'round_robin',
+            'least_connections',
+            'adaptive_round_robin',
+            'load_aware_round_robin',
+            'random'
+        ]
         if strategy not in valid_strategies:
             raise ValueError(f"Unknown strategy: {strategy}. Must be one of {valid_strategies}")
 
@@ -106,6 +114,8 @@ class LoadBalancer:
                 return self._least_connections(healthy_servers)
             elif self.strategy == 'adaptive_round_robin':
                 return self._adaptive_round_robin(healthy_servers)
+            elif self.strategy == 'load_aware_round_robin':
+                return self._load_aware_round_robin(healthy_servers)
             elif self.strategy == 'random':
                 return self._random(healthy_servers)
             else:
@@ -113,9 +123,86 @@ class LoadBalancer:
 
     def _round_robin(self, servers: List[VLLMServer]) -> VLLMServer:
         """Round-robin load balancing."""
-        server = servers[self._round_robin_index]
-        self._round_robin_index = (self._round_robin_index + 1) % len(servers)
+        index = self._round_robin_index % len(servers)
+        server = servers[index]
+        self._round_robin_index = (index + 1) % len(servers)
         return server
+
+    def _is_underperforming(self, server: VLLMServer, avg_success_rate: Optional[float]) -> bool:
+        """Return True when a server has enough history and is clearly underperforming."""
+        if avg_success_rate is None:
+            return False
+
+        total_requests = server.success_count + server.error_count
+        if total_requests < self.success_rate_window:
+            return False
+
+        return (
+            server.success_rate < self.success_rate_threshold
+            and server.success_rate < avg_success_rate * 0.8
+        )
+
+    def _get_average_success_rate(self, servers: List[VLLMServer]) -> Optional[float]:
+        """Return average success rate for servers with enough samples, if any."""
+        reliable_servers = [
+            s for s in servers
+            if (s.success_count + s.error_count) >= self.success_rate_window
+        ]
+
+        if not reliable_servers:
+            return None
+
+        return sum(s.success_rate for s in reliable_servers) / len(reliable_servers)
+
+    def _filter_underperforming_servers(self, servers: List[VLLMServer]) -> List[VLLMServer]:
+        """Prefer healthy servers that are not clearly underperforming."""
+        if len(servers) <= 1:
+            return servers
+
+        avg_success_rate = self._get_average_success_rate(servers)
+        if avg_success_rate is None:
+            return servers
+
+        acceptable = [
+            s for s in servers
+            if not self._is_underperforming(s, avg_success_rate)
+        ]
+        return acceptable if acceptable else servers
+
+    def _select_first_in_round_robin_order(
+        self,
+        servers: List[VLLMServer],
+        candidates: List[VLLMServer]
+    ) -> Optional[VLLMServer]:
+        """Pick the first candidate encountered in the current round-robin order."""
+        if not candidates:
+            return None
+
+        candidate_ids = {id(server) for server in candidates}
+        start_index = self._round_robin_index % len(servers)
+
+        for offset in range(len(servers)):
+            server = servers[(start_index + offset) % len(servers)]
+            if id(server) in candidate_ids:
+                return server
+
+        return candidates[0]
+
+    def _select_min_with_round_robin_tie_break(self, servers: List[VLLMServer], score_fn) -> Optional[VLLMServer]:
+        """Select the minimum-scored server and break ties using round-robin order."""
+        if not servers:
+            return None
+
+        best_score = min(score_fn(server) for server in servers)
+        candidates = [server for server in servers if score_fn(server) == best_score]
+        return self._select_first_in_round_robin_order(servers, candidates)
+
+    def _advance_round_robin_index(self, servers: List[VLLMServer], selected: VLLMServer) -> None:
+        """Advance round-robin index to the slot after the selected server."""
+        for i, server in enumerate(servers):
+            if server == selected:
+                self._round_robin_index = (i + 1) % len(servers)
+                return
 
     def _least_connections(self, servers: List[VLLMServer]) -> VLLMServer:
         """
@@ -138,44 +225,13 @@ class LoadBalancer:
         if not servers:
             return None
 
-        # Filter out servers with severely degraded performance if alternatives exist
-        # Only apply this filter when we have multiple servers and enough data
-        if len(servers) > 1:
-            reliable_servers = [
-                s for s in servers
-                if (s.success_count + s.error_count) >= self.success_rate_window
-            ]
-
-            if reliable_servers:
-                # Calculate average success rate among reliable servers
-                avg_success_rate = sum(s.success_rate for s in reliable_servers) / len(reliable_servers)
-
-                # Identify underperforming servers (below threshold AND below average)
-                underperforming = []
-                acceptable = []
-
-                for s in servers:
-                    total_requests = s.success_count + s.error_count
-                    if total_requests >= self.success_rate_window:
-                        # We have reliable data for this server
-                        if s.success_rate < self.success_rate_threshold and s.success_rate < avg_success_rate * 0.8:
-                            underperforming.append(s)
-                        else:
-                            acceptable.append(s)
-                    else:
-                        # Not enough data yet, treat as acceptable
-                        acceptable.append(s)
-
-                # If we have acceptable servers, prefer them
-                candidates = acceptable if acceptable else servers
-            else:
-                # Not enough reliable data yet, use all servers
-                candidates = servers
-        else:
-            candidates = servers
+        candidates = self._filter_underperforming_servers(servers)
 
         # Select server with minimum effective load
-        selected = min(candidates, key=lambda s: s.effective_load)
+        selected = self._select_min_with_round_robin_tie_break(
+            candidates,
+            lambda s: (s.effective_load, s.active_requests)
+        )
 
         # Log when we're avoiding a server due to poor performance
         if len(candidates) < len(servers):
@@ -210,7 +266,8 @@ class LoadBalancer:
             return None
 
         n = len(servers)
-        original_index = self._round_robin_index
+        original_index = self._round_robin_index % n
+        avg_success_rate = self._get_average_success_rate(servers)
 
         # Track candidates and reasons for skipping
         skipped_congested = []
@@ -227,22 +284,9 @@ class LoadBalancer:
                 skipped_congested.append(server)
                 continue
 
-            # Check success rate if we have enough data
-            total_requests = server.success_count + server.error_count
-            if total_requests >= self.success_rate_window:
-                # Calculate average success rate among all servers with enough data
-                reliable_servers = [
-                    s for s in servers
-                    if (s.success_count + s.error_count) >= self.success_rate_window
-                ]
-
-                if reliable_servers:
-                    avg_success_rate = sum(s.success_rate for s in reliable_servers) / len(reliable_servers)
-
-                    # Skip if success rate is below threshold AND significantly below average
-                    if server.success_rate < self.success_rate_threshold and server.success_rate < avg_success_rate * 0.8:
-                        skipped_low_success.append(server)
-                        continue
+            if self._is_underperforming(server, avg_success_rate):
+                skipped_low_success.append(server)
+                continue
 
             # Server passes all checks
             candidates.append(server)
@@ -260,18 +304,85 @@ class LoadBalancer:
                 f"Selected {selected.name} with {selected.active_requests} active requests as fallback"
             )
 
-        # Update round-robin index to the position after the selected server
-        # This maintains fairness even when skipping servers
-        for i, server in enumerate(servers):
-            if server == selected:
-                self._round_robin_index = (i + 1) % n
-                break
+        self._advance_round_robin_index(servers, selected)
 
         # Log skipped servers for visibility
         if skipped_congested:
             self.logger.debug(
                 f"[LoadBalancer] Skipped {len(skipped_congested)} congested server(s) "
                 f"(active_requests >= {self.max_active_requests})"
+            )
+        if skipped_low_success:
+            self.logger.debug(
+                f"[LoadBalancer] Skipped {len(skipped_low_success)} low success rate server(s) "
+                f"(success_rate < {self.success_rate_threshold:.2%})"
+            )
+
+        return selected
+
+    def _load_aware_round_robin(self, servers: List[VLLMServer]) -> VLLMServer:
+        """
+        Round-robin with dynamic load awareness for large server pools.
+
+        This keeps round-robin fairness when loads are similar, but skips servers
+        that are already materially above the cluster's current fair-share load.
+        That makes it a better fit than plain round-robin when concurrency is high
+        and server latency is uneven.
+        """
+        if not servers:
+            return None
+
+        n = len(servers)
+        original_index = self._round_robin_index % n
+        avg_success_rate = self._get_average_success_rate(servers)
+        total_active = sum(server.active_requests for server in servers)
+        min_active = min(server.active_requests for server in servers)
+
+        # Allow a server to stay within one request of the cluster's fair share.
+        fair_share_limit = max(min_active + 1, math.ceil((total_active + 1) / n))
+        hard_limit = self.max_active_requests
+
+        skipped_overloaded = []
+        skipped_low_success = []
+        candidates = []
+
+        for offset in range(n):
+            index = (original_index + offset) % n
+            server = servers[index]
+
+            if hard_limit > 0 and server.active_requests >= hard_limit:
+                skipped_overloaded.append(server)
+                continue
+
+            if server.active_requests > fair_share_limit:
+                skipped_overloaded.append(server)
+                continue
+
+            if self._is_underperforming(server, avg_success_rate):
+                skipped_low_success.append(server)
+                continue
+
+            candidates.append(server)
+
+        if candidates:
+            selected = candidates[0]
+        else:
+            fallback_servers = self._filter_underperforming_servers(servers)
+            selected = self._select_min_with_round_robin_tie_break(
+                fallback_servers,
+                lambda s: (s.effective_load, s.active_requests)
+            )
+            self.logger.warning(
+                f"[LoadBalancer] No server met dynamic load target (fair_share_limit={fair_share_limit}). "
+                f"Falling back to {selected.name} with {selected.active_requests} active requests"
+            )
+
+        self._advance_round_robin_index(servers, selected)
+
+        if skipped_overloaded:
+            self.logger.debug(
+                f"[LoadBalancer] Skipped {len(skipped_overloaded)} overloaded server(s) "
+                f"(dynamic fair_share_limit={fair_share_limit}, hard_limit={hard_limit})"
             )
         if skipped_low_success:
             self.logger.debug(

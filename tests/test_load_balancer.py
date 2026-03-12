@@ -145,6 +145,59 @@ class TestLoadBalancer:
         selections = [lb.get_server().name for _ in range(6)]
         assert selections == ["server_1", "server_2", "server_3", "server_1", "server_2", "server_3"]
 
+    def test_load_aware_round_robin_maintains_fairness(self):
+        """Test that load_aware_round_robin behaves like round-robin when loads are even."""
+        servers = [
+            VLLMServer(name="server_1", ip="127.0.0.1", port=8000),
+            VLLMServer(name="server_2", ip="127.0.0.1", port=8001),
+            VLLMServer(name="server_3", ip="127.0.0.1", port=8002),
+        ]
+
+        lb = LoadBalancer(servers, strategy='load_aware_round_robin')
+
+        selections = [lb.get_server().name for _ in range(6)]
+        assert selections == ["server_1", "server_2", "server_3", "server_1", "server_2", "server_3"]
+
+    def test_load_aware_round_robin_skips_overloaded_server(self):
+        """Test that load_aware_round_robin skips servers far above the fair-share load."""
+        servers = [
+            VLLMServer(name=f"server_{i}", ip="127.0.0.1", port=8000 + i)
+            for i in range(200)
+        ]
+
+        for index, server in enumerate(servers):
+            server.active_requests = 20
+            if index == 0:
+                server.active_requests = 80
+
+        lb = LoadBalancer(servers, strategy='load_aware_round_robin', max_active_requests=512)
+
+        selected = lb.get_server()
+        assert selected.name == "server_1"
+
+    def test_load_aware_round_robin_skips_low_success_rate(self):
+        """Test that load_aware_round_robin avoids servers with sustained poor success rate."""
+        servers = [
+            VLLMServer(name="server_1", ip="127.0.0.1", port=8000),
+            VLLMServer(name="server_2", ip="127.0.0.1", port=8001),
+            VLLMServer(name="server_3", ip="127.0.0.1", port=8002),
+        ]
+
+        for _ in range(10):
+            servers[0].record_error()
+            servers[1].record_success()
+            servers[2].record_success()
+
+        lb = LoadBalancer(
+            servers,
+            strategy='load_aware_round_robin',
+            success_rate_threshold=0.7,
+            success_rate_window=5
+        )
+
+        selected = lb.get_server()
+        assert selected.name == "server_2"
+
     def test_random_strategy(self):
         """Test random strategy."""
         servers = [

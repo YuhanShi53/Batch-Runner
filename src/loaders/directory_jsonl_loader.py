@@ -326,7 +326,7 @@ class DirectoryJSONLDataLoader(ChunkedLoaderMixin, StreamingLoaderMixin, Message
         if not self.streaming:
             return len(self.data)
         # In streaming mode, we don't know the total count upfront
-        raise NotImplementedError("Cannot get length in streaming mode")
+        raise TypeError("Streaming mode does not support len()")
 
 
 class MultimodalDirectoryJSONLDataLoader(ChunkedLoaderMixin, StreamingLoaderMixin, JSONLLoaderMixin, MultimodalDataLoader):
@@ -814,4 +814,4 @@ class MultimodalDirectoryJSONLDataLoader(ChunkedLoaderMixin, StreamingLoaderMixi
         if not self.streaming:
             return len(self.data)
         # In streaming mode, we don't know the total count upfront
-        raise NotImplementedError("Cannot get length in streaming mode")
+        raise TypeError("Streaming mode does not support len()")

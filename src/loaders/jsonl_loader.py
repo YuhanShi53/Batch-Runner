@@ -185,7 +185,9 @@ class JSONLDataLoader(ChunkedLoaderMixin, StreamingLoaderMixin, MessagesBuilderM
 
     def __len__(self):
         if self.streaming:
-            raise NotImplementedError("Cannot get length in streaming mode")
+            # list(iterator) treats TypeError as "no reliable length hint" and
+            # will continue consuming the iterator normally.
+            raise TypeError("Streaming mode does not support len()")
         return len(self.data)
 
 
@@ -477,5 +479,5 @@ class MultimodalJSONLDataLoader(ChunkedLoaderMixin, StreamingLoaderMixin, JSONLL
 
     def __len__(self):
         if self.streaming:
-            raise NotImplementedError("Cannot get length in streaming mode")
+            raise TypeError("Streaming mode does not support len()")
         return len(self.data)

@@ -41,7 +41,7 @@ runner:
 
   # Server configuration
   servers_dir: ./vllm_servers
-  load_balancing_strategy: least_connections  # Best for distributing load across many servers
+  load_balancing_strategy: load_aware_round_robin  # Better fairness for 200+ servers with uneven latency
   max_active_requests: 512  # Per-server limit (4096 / 160 servers = 26, set higher for headroom)
 
   # Health check configuration

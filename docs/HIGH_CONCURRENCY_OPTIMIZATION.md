@@ -109,7 +109,7 @@ runner:
   http_max_keepalive_connections: 50  # ~20% keepalive
 
   # Load balancing
-  load_balancing_strategy: least_connections  # Best for many servers
+  load_balancing_strategy: load_aware_round_robin  # Best when many servers have uneven response times
   max_active_requests: 512  # Per-server limit
 
   # Timeout and retries
