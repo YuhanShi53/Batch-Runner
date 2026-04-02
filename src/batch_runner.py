@@ -25,6 +25,7 @@ from .utils.progress import ProgressTracker
 from .utils.json_codec import json_codec
 from .utils.resume import BitmapResumeStore, HybridResumeStore, LegacyResumeStore
 from .adapters.base import ModelAdapter
+from .adapters.openai_adapter import OpenAIAdapter
 
 
 @dataclass
@@ -45,6 +46,7 @@ class BatchConfig:
     model_name: str = "default"
     temperature: float = 0.7
     max_tokens: int = 1000
+    rollout_n: int = 1
     system_prompt: str = ""
 
     # Server settings
@@ -189,6 +191,7 @@ class BatchRunner:
         self.config = config
         self.loader = loader
         self.saver = saver
+        self._validate_rollout_configuration()
 
         self.logger = logging.getLogger(__name__)
         self.stats = BatchStats()
@@ -245,6 +248,18 @@ class BatchRunner:
             stats=self.stats
         )
         self.resume_store = self._create_resume_store()
+
+    def _validate_rollout_configuration(self):
+        """Validate rollout-related settings before starting runtime state."""
+        if self.config.rollout_n < 1:
+            raise ValueError(f"runner.rollout_n must be >= 1, got {self.config.rollout_n}")
+
+        if self.config.rollout_n > 1 and not isinstance(self.config.adapter, OpenAIAdapter):
+            adapter_name = type(self.config.adapter).__name__ if self.config.adapter else "None"
+            raise ValueError(
+                "runner.rollout_n > 1 is only supported with OpenAIAdapter for "
+                f"OpenAI-compatible chat completions. Got {adapter_name}."
+            )
 
     async def _get_http_client(self):
         """
@@ -303,6 +318,12 @@ class BatchRunner:
         """Execute the batch inference process with async."""
         self.logger.info("Starting batch inference with %s concurrent requests", self.config.max_concurrency)
         self.logger.info("Healthy servers: %s", self.server_manager.get_server_count())
+        if self.config.rollout_n > 1:
+            self.logger.info(
+                "rollout_n=%s enabled: requesting %s choices per input via a single API call",
+                self.config.rollout_n,
+                self.config.rollout_n,
+            )
         await self.server_manager.start_async()
 
         streaming_mode = self.config.get('streaming', True)
@@ -428,6 +449,7 @@ class BatchRunner:
             messages=messages,
             temperature=self.config.temperature,
             max_tokens=self.config.max_tokens,
+            rollout_n=self.config.rollout_n,
             top_p=self.config.top_p,
             frequency_penalty=self.config.frequency_penalty,
             presence_penalty=self.config.presence_penalty,

@@ -314,13 +314,14 @@ class OutputFormatterMixin:
         )
 
         if projection == "minimal":
-            choices = result.model_output.get("choices", []) if result.model_output else []
-            first_choice = choices[0] if choices else {}
-            message = first_choice.get("message", {}) if isinstance(first_choice, dict) else {}
+            contents = self.extract_contents(result)
+            finish_reasons = self.extract_finish_reasons(result)
             output_data = {
                 "request_id": result.request_id,
-                "content": message.get("content"),
-                "finish_reason": first_choice.get("finish_reason"),
+                "content": contents[0] if contents else None,
+                "contents": contents,
+                "finish_reason": finish_reasons[0] if finish_reasons else None,
+                "finish_reasons": finish_reasons,
                 "usage": result.model_output.get("usage", {}) if result.model_output else {},
             }
             if result.additional_data is not None:
@@ -365,7 +366,7 @@ class OutputFormatterMixin:
                 return {"response": content}
         """
         try:
-            return result.model_output['choices'][0]['message']['content']
+            return self.extract_contents(result)[0]
         except (KeyError, IndexError, TypeError):
             return None
 

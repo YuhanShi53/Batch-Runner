@@ -90,6 +90,7 @@ def _validate_config(config: Dict[str, Any]):
         'model_name': 'default',
         'temperature': 0.7,
         'max_tokens': 1000,
+        'rollout_n': 1,
         'system_prompt': '',
         'load_balancing_strategy': 'round_robin',
         'progress_report_interval': 10,

@@ -4,6 +4,7 @@ CSV file result saver implementation.
 Saves inference results to a CSV file.
 """
 import csv
+import json
 import logging
 import threading
 from typing import Dict, Any
@@ -45,7 +46,7 @@ class CSVResultSaver(ResultSaver):
             return
 
         # Determine fields from model output structure
-        default_fields = ['request_id', 'content', 'finish_reason', 'total_tokens']
+        default_fields = ['request_id', 'content', 'contents', 'num_choices', 'finish_reason', 'total_tokens']
         fieldnames = self.fields if self.fields else default_fields
 
         self._file = open(self.output_path, 'w', encoding=self.encoding, newline='')
@@ -112,16 +113,18 @@ class CSVResultSaver(ResultSaver):
 
     def _build_row(self, result: SaveResult) -> Dict[str, Any]:
         """Build a CSV row from a save result."""
-        choices = result.model_output.get('choices', []) if result.model_output else []
-        first_choice = choices[0] if choices else {}
-        message = first_choice.get('message', {}) if isinstance(first_choice, dict) else {}
-        content = message.get('content', '')
+        choices = self.extract_choices(result)
+        contents = self.extract_contents(result)
+        finish_reasons = self.extract_finish_reasons(result)
+        content = contents[0] if contents else ''
         usage = result.model_output.get('usage', {}) if result.model_output else {}
 
         row = {
             'request_id': result.request_id,
             'content': content,
-            'finish_reason': first_choice.get('finish_reason', '') if isinstance(first_choice, dict) else '',
+            'contents': json.dumps(contents, ensure_ascii=False),
+            'num_choices': len(choices),
+            'finish_reason': finish_reasons[0] if finish_reasons else '',
             'total_tokens': usage.get('total_tokens', ''),
         }
 

@@ -14,6 +14,8 @@ Key properties:
 - loaders can surface `dispatch_cost` for cost-aware routing
 - JSONL savers support batched `save_batch()`
 - `output_projection: minimal` reduces serialization and disk overhead
+- `runner.rollout_n` can request multiple choices in one vLLM/OpenAI-compatible call
+- minimal projection keeps `content` for the first choice and adds `contents` for all choices
 
 ## Main files
 

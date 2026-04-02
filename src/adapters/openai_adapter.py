@@ -33,6 +33,7 @@ class OpenAIAdapter(ModelAdapter):
         messages: List[Dict[str, str]],
         temperature: float,
         max_tokens: int,
+        rollout_n: int = 1,
         top_p: float = 1.0,
         frequency_penalty: float = 0.0,
         presence_penalty: float = 0.0,
@@ -63,6 +64,9 @@ class OpenAIAdapter(ModelAdapter):
             "frequency_penalty": frequency_penalty,
             "presence_penalty": presence_penalty,
         }
+
+        if rollout_n > 1:
+            payload["n"] = rollout_n
 
         # Add any additional parameters
         payload.update(kwargs)

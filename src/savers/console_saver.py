@@ -40,14 +40,12 @@ class ConsoleResultSaver(ResultSaver):
                 print(f"Error: {result.error}")
             else:
                 # Extract content
-                content = ''
-                if result.model_output:
-                    choices = result.model_output.get('choices', [])
-                    if choices and len(choices) > 0:
-                        message = choices[0].get('message', {})
-                        content = message.get('content', '')
+                contents = self.extract_contents(result)
+                content = contents[0] or '' if contents else ''
 
                 print(f"Response: {content[:200]}{'...' if len(content) > 200 else ''}")
+                if len(contents) > 1:
+                    print(f"Choices: {len(contents)}")
 
                 # Show usage info
                 usage = result.model_output.get('usage', {}) if result.model_output else {}

@@ -120,6 +120,21 @@ Optional:
 - `resume_backend`
 - `image_encode_workers`
 
+### Sampling behavior
+
+- `model_name`
+- `temperature`
+- `max_tokens`
+- `rollout_n`
+- `top_p`
+- `frequency_penalty`
+- `presence_penalty`
+
+`rollout_n` defaults to `1`. When set above `1`, `BatchRunner` still sends one
+request per input item, but `OpenAIAdapter` adds OpenAI-compatible `n` so the
+server can return multiple choices in a single response. Progress, resume, and
+request counting still operate on original input items, not per-choice outputs.
+
 ## Server discovery
 
 The current implementation discovers server marker files under `servers_dir`. Names must match:
@@ -196,6 +211,19 @@ class MySaver(ResultSaver):
 ```
 
 If your saver can persist efficiently in groups, override `save_batch()` as well.
+
+### Minimal projection and multiple choices
+
+When a saver uses `output_projection: minimal`, the compact output keeps both
+backward-compatible single-choice fields and the new aggregated fields:
+
+- `content`: first choice content
+- `finish_reason`: first choice finish reason
+- `contents`: all choice contents
+- `finish_reasons`: all choice finish reasons
+- `usage`: response-level usage payload
+
+This keeps older consumers working while exposing full multi-choice rollout data.
 
 ## Registration system
 

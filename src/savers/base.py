@@ -152,9 +152,48 @@ class ResultSaver(ABC):
             Generated text content, or None if not found
         """
         try:
-            return result.model_output['choices'][0]['message']['content']
+            return self.extract_contents(result)[0]
         except (KeyError, IndexError, TypeError):
             return None
+
+    def extract_choices(self, result: SaveResult) -> List[Dict[str, Any]]:
+        """
+        Extract normalized choice dictionaries from a SaveResult.
+
+        Returns:
+            List of choice dicts, or an empty list if unavailable
+        """
+        try:
+            choices = result.model_output.get('choices', [])
+        except (AttributeError, TypeError):
+            return []
+
+        return [choice for choice in choices if isinstance(choice, dict)]
+
+    def extract_contents(self, result: SaveResult) -> List[Optional[str]]:
+        """
+        Extract content for every returned choice.
+
+        Returns:
+            List aligned with `choices`, using None when content is missing
+        """
+        contents = []
+        for choice in self.extract_choices(result):
+            message = choice.get('message', {})
+            if not isinstance(message, dict):
+                contents.append(None)
+                continue
+            contents.append(message.get('content'))
+        return contents
+
+    def extract_finish_reasons(self, result: SaveResult) -> List[Optional[str]]:
+        """
+        Extract finish reason for every returned choice.
+
+        Returns:
+            List aligned with `choices`, using None when unavailable
+        """
+        return [choice.get('finish_reason') for choice in self.extract_choices(result)]
 
     # ===== Standard dunder methods =====
 

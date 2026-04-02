@@ -3,8 +3,13 @@ Tests for batch runner concurrency behavior.
 """
 import asyncio
 import logging
+import json
+
+import pytest
 
 from src.batch_runner import BatchRunner, BatchConfig, BatchStats
+from src.adapters.openai_adapter import OpenAIAdapter
+from src.adapters.simple_adapter import SimpleAdapter
 from src.loaders.base import LoadResult
 from src.savers.base import SaveResult
 
@@ -166,3 +171,84 @@ def test_flush_completion_batch_updates_stats_and_resume():
         runner._writer_executor.shutdown(wait=True)
 
     asyncio.run(exercise())
+
+
+def test_process_request_async_includes_rollout_n_in_openai_payload():
+    """OpenAI-compatible requests should include n when rollout_n > 1."""
+
+    class StubServer:
+        name = "server_127.0.0.1_8000"
+        ip = "127.0.0.1"
+        port = 8000
+        base_url = "http://127.0.0.1:8000"
+
+        def increment_active(self, cost=1.0):
+            return 1
+
+        def record_success(self, cost=1.0):
+            return None
+
+        def record_error(self, cost=1.0):
+            return None
+
+    class StubLoadBalancer:
+        def get_server(self, excluded_names=None):
+            del excluded_names
+            return StubServer()
+
+    async def exercise():
+        runner = object.__new__(BatchRunner)
+        runner.config = BatchConfig(rollout_n=3)
+        runner.config.adapter = OpenAIAdapter()
+        runner.load_balancer = StubLoadBalancer()
+        runner.logger = logging.getLogger("tests.test_batch_runner")
+        runner.stats = BatchStats()
+        runner._writer_failure = None
+
+        captured = {}
+
+        async def fake_send_request(client, url, payload_bytes):
+            del client, url
+            captured.update(json.loads(payload_bytes.decode("utf-8")))
+            return {
+                "choices": [
+                    {"message": {"role": "assistant", "content": "one"}, "finish_reason": "stop"},
+                    {"message": {"role": "assistant", "content": "two"}, "finish_reason": "stop"},
+                    {"message": {"role": "assistant", "content": "three"}, "finish_reason": "length"},
+                ],
+                "usage": {"total_tokens": 9},
+            }
+
+        runner._send_request_async_no_retry = fake_send_request
+
+        completion_queue = asyncio.Queue()
+        request = LoadResult(messages=[{"role": "user", "content": "hello"}], request_id="req-rollout")
+        await runner._process_request_async(request, client=object(), completion_queue=completion_queue)
+
+        result = await completion_queue.get()
+        assert captured["n"] == 3
+        assert [choice["message"]["content"] for choice in result.model_output["choices"]] == [
+            "one",
+            "two",
+            "three",
+        ]
+
+    asyncio.run(exercise())
+
+
+def test_batch_runner_rejects_invalid_rollout_n(tmp_path):
+    """rollout_n must be at least one."""
+    config = BatchConfig(servers_dir=str(tmp_path), rollout_n=0)
+    config.adapter = OpenAIAdapter()
+
+    with pytest.raises(ValueError, match="rollout_n must be >= 1"):
+        BatchRunner(config, StubLoader([]), StubSaver())
+
+
+def test_batch_runner_rejects_rollout_n_for_non_openai_adapter(tmp_path):
+    """Only OpenAIAdapter supports server-side multi-choice rollout."""
+    config = BatchConfig(servers_dir=str(tmp_path), rollout_n=2)
+    config.adapter = SimpleAdapter()
+
+    with pytest.raises(ValueError, match="only supported with OpenAIAdapter"):
+        BatchRunner(config, StubLoader([]), StubSaver())

@@ -28,6 +28,7 @@ runner:
   model_name: meta-llama/Llama-2-7b-chat-hf
   temperature: 0.7
   max_tokens: 1000
+  rollout_n: 1  # Request N choices from a single OpenAI-compatible API call
   system_prompt: ""  # Optional: Set a system prompt for all requests
   top_p: 1.0
   frequency_penalty: 0.0
